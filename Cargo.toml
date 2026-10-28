@@ -15,7 +15,7 @@ socket2 = { version = "0.6", features = ["all"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring"] }
 spake2 = "0.4"
-hmac = "0.12"
+hmac = "0.13"
 sha2 = "0.10"
 getrandom = "0.4"
 # Settings and logging
