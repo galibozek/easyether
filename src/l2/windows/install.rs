@@ -58,9 +58,19 @@ pub fn system_tool(name: &str) -> PathBuf {
     PathBuf::from(root).join("System32").join(name)
 }
 
+/// A console tool started from this (windowless) program would otherwise flash its own
+/// console window; its output is captured anyway.
+fn quiet_command(program: &str) -> Command {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+    let mut cmd = Command::new(system_tool(program));
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd
+}
+
 /// Runs a system tool quietly; on failure its output becomes the error message.
 pub fn run(program: &str, args: &[&str]) -> io::Result<()> {
-    let out = Command::new(system_tool(program)).args(args).output()?;
+    let out = quiet_command(program).args(args).output()?;
     if out.status.success() {
         return Ok(());
     }
@@ -118,7 +128,7 @@ pub fn uninstall_all(log: &Logger) -> io::Result<()> {
 
 /// Deletes every driver-store package (oemNN.inf) whose original INF name matches.
 fn delete_driver_package(original_inf: &str) -> io::Result<()> {
-    let out = Command::new(system_tool("pnputil.exe")).arg("/enum-drivers").output()?;
+    let out = quiet_command("pnputil.exe").arg("/enum-drivers").output()?;
     // Labels are localized; the oemNN.inf and original file names are not.
     let text = String::from_utf8_lossy(&out.stdout)
         .replace("\r\n", "\n")
