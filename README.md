@@ -70,6 +70,8 @@ start. The drivers it installs are signed by the SoftEther project.
 1. Start EasyEther, open the **Client** tab, enter address, port and password, click **Connect**.
 2. The virtual adapter ("VPN Client Adapter - VPN127" on Windows, `eeth0` on Linux) now sits on
    the remote network. Use DHCP, link-local, or set a static IPv4 under **Network settings**.
+   On Linux, Automatic mode runs `dhcpcd` on `eeth0` (install it if missing): IPv4 only, no
+   default gateway and no DNS changes, falling back to 169.254.x.x when no DHCP server answers.
 3. Start the diagnostic software and select that adapter, as if the cable were plugged in locally.
 
 Closing the window exits; while a tunnel is active it asks for confirmation first. A tray icon

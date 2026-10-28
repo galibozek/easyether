@@ -196,6 +196,19 @@ pub fn apply_static_ipv4(addr: std::net::Ipv4Addr, prefix: u8, log: &Logger) -> 
     platform::apply_static_ipv4(addr, prefix, log)
 }
 
+/// "Automatic" IPv4 on the client's virtual adapter where the OS does not do it by itself
+/// (Linux: dhcpcd). Dropping the guard stops it. `None` when nothing needs to run.
+pub fn start_dhcp(log: &Logger) -> io::Result<Option<Box<dyn Send>>> {
+    #[cfg(target_os = "linux")]
+    return platform::start_dhcp(log);
+    // Windows runs DHCP on the virtual adapter itself.
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = log;
+        Ok(None)
+    }
+}
+
 /// Linux: the root helper started by pkexec (see linux/helper.rs).
 #[cfg(target_os = "linux")]
 pub const PRIVILEGED_HELPER_ARG: &str = linux::helper::ARG;

@@ -12,6 +12,7 @@
 //!   brtap <bridge> <mac>       -> ok                           + tap fd (port of the bridge)
 //!   ip <replace|del> <cidr>    -> ok
 //!   offload <ifname> <gro> <lro> -> ok
+//!   dhcp <start|stop>          -> ok                           (dhcpcd on the TAP adapter)
 
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -20,7 +21,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 
 use super::packet::{self, Offload, Opened};
-use super::tap;
+use super::{dhcp, tap};
 use crate::log::Logger;
 
 pub const ARG: &str = "--privileged-helper";
@@ -231,6 +232,10 @@ pub fn ip_addr(action: &str, cidr: &str, log: &Logger) -> io::Result<()> {
     call(&format!("ip {action} {cidr}"), log).map(|_| ())
 }
 
+pub fn dhcp(action: &str, log: &Logger) -> io::Result<()> {
+    call(&format!("dhcp {action}"), log).map(|_| ())
+}
+
 pub fn restore_offload(ifname: &str, prev: Offload) -> io::Result<()> {
     let log = Logger::new(None).0;
     call(&format!("offload {ifname} {} {}", prev.gro as u8, prev.lro as u8), &log).map(|_| ())
@@ -247,10 +252,17 @@ pub fn run() -> i32 {
         return 1;
     };
     let mut line = String::new();
+    let mut dhcpcd: Option<Child> = None;
     loop {
         line.clear();
         match reader.read_line(&mut line) {
-            Ok(0) | Err(_) => return 0,
+            Ok(0) | Err(_) => {
+                // The GUI is gone: do not leave dhcpcd behind.
+                if let Some(child) = dhcpcd.take() {
+                    dhcp::stop(child);
+                }
+                return 0;
+            }
             Ok(_) => {}
         }
         let mut words = line.split_whitespace();
@@ -293,6 +305,22 @@ pub fn run() -> i32 {
                 match packet::offload_set(ifname, prev) {
                     Ok(()) => ("ok".into(), None),
                     Err(e) => (format!("err {e}"), None),
+                }
+            }
+            (Some("dhcp"), Some(action @ ("start" | "stop")), ..) => {
+                if let Some(child) = dhcpcd.take() {
+                    dhcp::stop(child);
+                }
+                if action == "start" {
+                    match dhcp::spawn() {
+                        Ok(child) => {
+                            dhcpcd = Some(child);
+                            ("ok".into(), None)
+                        }
+                        Err(e) => (format!("err {e}"), None),
+                    }
+                } else {
+                    ("ok".into(), None)
                 }
             }
             _ => ("err unknown request".into(), None),

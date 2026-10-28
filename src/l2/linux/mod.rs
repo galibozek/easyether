@@ -1,5 +1,6 @@
 //! Linux backend: AF_PACKET raw socket (server) and TAP device (client).
 
+mod dhcp;
 pub mod helper;
 mod packet;
 mod tap;
@@ -194,6 +195,73 @@ pub fn apply_static_ipv4(addr: Ipv4Addr, prefix: u8, log: &Logger) -> io::Result
     ip_addr_privileged("replace", &cidr, log)?;
     log.info(format!("Static IPv4 {cidr} set on '{}'.", tap::IFNAME));
     Ok(Box::new(StaticAddr(cidr, log.clone())))
+}
+
+enum Dhcp {
+    /// We run as root and started dhcpcd ourselves.
+    Direct(Option<std::process::Child>),
+    /// dhcpcd runs under the privileged helper.
+    Helper,
+}
+
+struct DhcpGuard {
+    dhcp: Dhcp,
+    done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    log: Logger,
+}
+
+impl Drop for DhcpGuard {
+    fn drop(&mut self) {
+        self.done.store(true, std::sync::atomic::Ordering::Relaxed);
+        match &mut self.dhcp {
+            Dhcp::Direct(child) => {
+                if let Some(child) = child.take() {
+                    dhcp::stop(child);
+                }
+            }
+            Dhcp::Helper => {
+                let _ = helper::dhcp("stop", &self.log);
+            }
+        }
+    }
+}
+
+/// "Automatic" IPv4 on the TAP adapter: runs dhcpcd until the guard is dropped and logs the
+/// address once it is there.
+pub fn start_dhcp(log: &Logger) -> io::Result<Option<Box<dyn Send>>> {
+    // SAFETY: geteuid has no preconditions.
+    let dhcp = if unsafe { libc::geteuid() } == 0 {
+        Dhcp::Direct(Some(dhcp::spawn()?))
+    } else {
+        helper::dhcp("start", log)?;
+        Dhcp::Helper
+    };
+    log.info(format!(
+        "DHCP started on '{}' (IPv4 only, no default gateway; falls back to 169.254.x.x).",
+        tap::IFNAME
+    ));
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (done2, log2) = (done.clone(), log.clone());
+    std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while !done2.load(std::sync::atomic::Ordering::Relaxed) && std::time::Instant::now() < deadline {
+            if let Some(ip) = ipv4_addresses().get(tap::IFNAME).and_then(|v| v.first()) {
+                let kind = if ip.is_link_local() {
+                    " (link-local, no DHCP server answered)"
+                } else {
+                    ""
+                };
+                log2.info(format!("IPv4 {ip}{kind} on '{}'.", tap::IFNAME));
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    });
+    Ok(Some(Box::new(DhcpGuard {
+        dhcp,
+        done,
+        log: log.clone(),
+    })))
 }
 
 /// A system tool by absolute path (we run with root/capabilities; never trust PATH).
