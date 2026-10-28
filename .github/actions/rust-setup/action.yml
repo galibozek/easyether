@@ -1,0 +1,36 @@
+# Shared setup for all jobs: Rust toolchain (with cache) and the system packages the GUI
+# build needs. Used by build.yml and ci.yml so the steps live in one place.
+name: Rust setup
+description: Stable Rust toolchain, optional extra targets/components, system libraries
+
+inputs:
+  target:
+    description: Extra Rust targets (comma-separated), e.g. x86_64-pc-windows-gnu
+    default: ""
+  components:
+    description: Extra rustup components (comma-separated), e.g. clippy, rustfmt
+    default: ""
+  mingw:
+    description: Also install the MinGW cross toolchain and zip (Windows packaging)
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    # Includes a cargo registry + target/ cache. One shared key per target set, so the release
+    # build (tags) reuses the cache that ci.yml keeps warm on main.
+    - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+      with:
+        toolchain: stable
+        target: ${{ inputs.target }}
+        components: ${{ inputs.components }}
+        cache-shared-key: easyether-${{ inputs.target || 'host' }}
+    - name: System libraries
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libxkbcommon-dev libgl1-mesa-dev libx11-dev libxcursor-dev \
+          libxrandr-dev libxi-dev libwayland-dev
+        if [ "${{ inputs.mingw }}" = "true" ]; then
+          sudo apt-get install -y mingw-w64 zip
+        fi

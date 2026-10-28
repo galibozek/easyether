@@ -1,0 +1,38 @@
+# Code checks for pull requests: formatting, clippy, tests, and that the Windows targets still
+# compile. Also runs on pushes to main so the build cache on the default branch stays warm for
+# the release builds (build.yml). Release packages are produced by build.yml on releases.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Actions are pinned to full commit SHAs (version in the comment).
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/rust-setup
+        with:
+          components: clippy, rustfmt
+          target: x86_64-pc-windows-gnu, i686-pc-windows-gnu
+          mingw: "true"
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test --locked
+      - name: Windows targets compile
+        run: |
+          cargo build --locked --target x86_64-pc-windows-gnu
+          cargo build --locked --target i686-pc-windows-gnu

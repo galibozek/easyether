@@ -1,0 +1,71 @@
+# Release packages: when a GitHub release is published (from a tag), builds the Linux tarball and
+# the Windows x64/x86 ZIPs and attaches them to that release. Code checks run in ci.yml.
+name: build
+
+on:
+  release:
+    types: [published]
+
+# Actions are pinned to full commit SHAs (version in the comment).
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/rust-setup
+      - name: Build
+        run: cargo build --release --locked
+      - name: Package
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          mkdir -p dist/EasyEther
+          cp target/release/easyether LICENSE NOTICE dist/EasyEther/
+          tar -C dist -czf "dist/EasyEther-$version-linux-x64.tar.gz" EasyEther
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: easyether-linux-x64
+          path: dist/*.tar.gz
+
+  windows:
+    runs-on: ubuntu-26.04
+    strategy:
+      matrix:
+        include:
+          - arch: x64
+            target: x86_64-pc-windows-gnu
+          - arch: x86
+            target: i686-pc-windows-gnu
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/rust-setup
+        with:
+          target: ${{ matrix.target }}
+          mingw: "true"
+      - name: Build and package
+        run: |
+          cargo build --release --locked --target ${{ matrix.target }}
+          ./package-windows.sh ${{ matrix.arch }} target/${{ matrix.target }}/release/easyether.exe
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: easyether-windows-${{ matrix.arch }}
+          path: dist/*.zip
+
+  release:
+    needs: [linux, windows]
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          files: dist/*

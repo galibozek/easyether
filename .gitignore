@@ -1,0 +1,5 @@
+/target
+/dist
+# local tooling state (sandbox mounts these into every directory)
+.claude/
+.mcp.json

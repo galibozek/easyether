@@ -1,0 +1,22 @@
+EasyEther
+Copyright (C) 2026 EasyEther contributors
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. See the LICENSE file for the full text.
+
+Third-party components
+----------------------
+
+SoftEther VPN kernel drivers (unmodified, signed binaries)
+  drivers/selow/  SeLow_x64.sys, SeLow_x86.sys (+ .inf, .cat)  - NDIS protocol driver
+  drivers/neo/    Neo6_x64_VPN127.sys, Neo6_x86_VPN127.sys (+ .inf, .cat) - virtual adapter
+  Copyright (c) SoftEther VPN Project at University of Tsukuba, Japan
+  Licensed under the Apache License, Version 2.0 (see drivers/LICENSE-SoftEther.txt)
+  Source: https://github.com/SoftEtherVPN/SoftEtherVPN_Stable
+          (src/bin/hamcore/DriverPackages/SeLow_Win10, Neo6_Win10)
+
+Rust crates used by the program are each under their own permissive licenses
+(MIT, Apache-2.0, ISC, BSD and similar); see Cargo.lock for the list and
+`cargo license` or the crates' repositories for their texts.
