@@ -10,18 +10,17 @@ use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 
-use hmac::{Hmac, KeyInit, Mac};
+use ring::rand::SecureRandom;
+use ring::{digest, hmac};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{CryptoProvider, WebPkiSupportedAlgorithms};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use rustls::{ClientConfig, ClientConnection, Connection, DigitallySignedStruct, ServerConfig};
 use rustls::{ServerConnection, SignatureScheme, StreamOwned};
-use sha2::{Digest, Sha256};
 use spake2::{Ed25519Group, Identity, Password, Spake2};
 
 use crate::proto;
 
-type HmacSha256 = Hmac<Sha256>;
 const SPAKE_ID: &[u8] = b"easyether-v1";
 /// Appended to a TLS protocol error when the server is probably not in Secure mode.
 pub const SECURE_MISMATCH_HINT: &str = "is \"Secure\" set the same way on both computers?";
@@ -50,6 +49,18 @@ fn other(e: impl std::fmt::Display) -> io::Error {
     io::Error::other(e.to_string())
 }
 
+/// Fills `buf` from the OS random generator (through ring, which rustls already uses).
+pub fn random_fill(buf: &mut [u8]) {
+    ring::rand::SystemRandom::new().fill(buf).expect("OS random generator");
+}
+
+fn sha256(data: &[u8]) -> [u8; 32] {
+    digest::digest(&digest::SHA256, data)
+        .as_ref()
+        .try_into()
+        .expect("SHA-256 is 32 bytes")
+}
+
 const PASSWORD_ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
 pub const PASSWORD_LEN: usize = 8;
 
@@ -58,7 +69,7 @@ pub fn generate_password() -> String {
     let mut out = String::with_capacity(PASSWORD_LEN);
     let mut b = [0u8; 64];
     while out.len() < PASSWORD_LEN {
-        getrandom::fill(&mut b).expect("OS random generator");
+        random_fill(&mut b);
         // Rejection sampling keeps every character equally likely (252 = 7 * 36).
         for &x in b.iter().filter(|&&x| x < 252) {
             if out.len() == PASSWORD_LEN {
@@ -100,7 +111,7 @@ impl ServerIdentity {
         let ck = rcgen::generate_simple_self_signed(vec!["easyether".to_string()]).map_err(other)?;
         let cert: CertificateDer<'static> = ck.cert.der().clone();
         let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(ck.signing_key.serialize_der()));
-        let fingerprint = Sha256::digest(cert.as_ref()).into();
+        let fingerprint = sha256(cert.as_ref());
         let config = ServerConfig::builder_with_provider(provider())
             .with_protocol_versions(&[&rustls::version::TLS13])
             .map_err(other)?
@@ -118,11 +129,21 @@ impl ServerIdentity {
     }
 }
 
-fn confirmation(key: &[u8], role: &[u8], fingerprint: &[u8; 32]) -> HmacSha256 {
-    let mut m = <HmacSha256 as KeyInit>::new_from_slice(key).expect("HMAC accepts any key length");
-    m.update(role);
-    m.update(fingerprint);
-    m
+/// Confirmation message: role followed by the certificate fingerprint.
+fn confirmation_msg(role: &[u8], fingerprint: &[u8; 32]) -> Vec<u8> {
+    [role, fingerprint.as_slice()].concat()
+}
+
+/// HMAC-SHA256(key, role ‖ fingerprint).
+fn confirmation(key: &[u8], role: &[u8], fingerprint: &[u8; 32]) -> Vec<u8> {
+    let key = hmac::Key::new(hmac::HMAC_SHA256, key);
+    hmac::sign(&key, &confirmation_msg(role, fingerprint)).as_ref().to_vec()
+}
+
+/// Constant-time check of a peer's confirmation tag.
+fn confirmation_ok(key: &[u8], role: &[u8], fingerprint: &[u8; 32], tag: &[u8]) -> bool {
+    let key = hmac::Key::new(hmac::HMAC_SHA256, key);
+    hmac::verify(&key, &confirmation_msg(role, fingerprint), tag).is_ok()
 }
 
 /// Outcome of the server-side handshake.
@@ -236,19 +257,13 @@ pub fn server_handshake(tcp: TcpStream, id: &ServerIdentity, password: Option<&s
 
     let mut client_tag = [0u8; 32];
     s.read_exact(&mut client_tag)?;
-    if confirmation(&key, b"client", &id.fingerprint)
-        .verify_slice(&client_tag)
-        .is_err()
-    {
+    if !confirmation_ok(&key, b"client", &id.fingerprint, &client_tag) {
         // Slow down guessing; the caller counts failures.
         std::thread::sleep(std::time::Duration::from_secs(1));
         let _ = proto::write_error(&mut s, "Wrong password.");
         return Ok(ServerHandshake::WrongPassword);
     }
-    let server_tag = confirmation(&key, b"server", &id.fingerprint)
-        .finalize()
-        .into_bytes()
-        .to_vec();
+    let server_tag = confirmation(&key, b"server", &id.fingerprint);
     Ok(ServerHandshake::Authenticated(Authenticated::Tls {
         s: Box::new(s),
         server_tag,
@@ -293,7 +308,7 @@ pub fn client_handshake(tcp: TcpStream, password: Option<&str>) -> io::Result<Se
         return Err(other(format!("server uses unsupported protocol version {ver}")));
     }
     let fingerprint: [u8; 32] = match s.conn.peer_certificates().and_then(|c| c.first()) {
-        Some(cert) => Sha256::digest(cert.as_ref()).into(),
+        Some(cert) => sha256(cert.as_ref()),
         None => return Err(other("server did not present a certificate")),
     };
 
@@ -303,16 +318,13 @@ pub fn client_handshake(tcp: TcpStream, password: Option<&str>) -> io::Result<Se
     let inbound = proto::read_blob(&mut s)?;
     let key = spake.finish(&inbound).map_err(|e| other(format!("SPAKE2: {e:?}")))?;
 
-    let client_tag = confirmation(&key, b"client", &fingerprint).finalize().into_bytes();
+    let client_tag = confirmation(&key, b"client", &fingerprint);
     s.write_all(&client_tag)?;
     s.flush()?;
     proto::read_tag(&mut s, proto::MAGIC_OK)?;
     let mut server_tag = [0u8; 32];
     s.read_exact(&mut server_tag)?;
-    if confirmation(&key, b"server", &fingerprint)
-        .verify_slice(&server_tag)
-        .is_err()
-    {
+    if !confirmation_ok(&key, b"server", &fingerprint, &server_tag) {
         return Err(other(
             "the server could not prove it knows the password (possible man-in-the-middle)",
         ));
@@ -489,6 +501,30 @@ impl SecureStream {
 mod tests {
     use super::*;
     use std::net::TcpListener;
+
+    #[test]
+    fn digest_and_hmac_known_answers() {
+        // FIPS 180-2 "abc".
+        assert_eq!(
+            sha256(b"abc"),
+            *b"\xba\x78\x16\xbf\x8f\x01\xcf\xea\x41\x41\x40\xde\x5d\xae\x22\x23\
+               \xb0\x03\x61\xa3\x96\x17\x7a\x9c\xb4\x10\xff\x61\xf2\x00\x15\xad"
+        );
+        // HMAC over role ‖ fingerprint, the same bytes the earlier streaming version hashed.
+        let fp = sha256(b"cert");
+        let tag = confirmation(b"key", b"client", &fp);
+        assert_eq!(tag.len(), 32);
+        assert!(confirmation_ok(b"key", b"client", &fp, &tag));
+        assert!(!confirmation_ok(b"key", b"server", &fp, &tag));
+        assert!(!confirmation_ok(b"other", b"client", &fp, &tag));
+        // RFC 4231 test case 2 through the same ring API.
+        let key = hmac::Key::new(hmac::HMAC_SHA256, b"Jefe");
+        assert_eq!(
+            hmac::sign(&key, b"what do ya want for nothing?").as_ref(),
+            b"\x5b\xdc\xc1\x46\xbf\x60\x75\x4e\x6a\x04\x24\x26\x08\x95\x75\xc7\
+              \x5a\x00\x3f\x08\x9d\x27\x39\x83\x9d\xec\x58\xb9\x64\xec\x38\x43"
+        );
+    }
 
     fn run(server_pw: Option<&str>, client_pw: Option<&str>) -> (io::Result<bool>, io::Result<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();

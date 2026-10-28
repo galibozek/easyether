@@ -80,7 +80,7 @@ fn is_permission(e: &io::Error) -> bool {
 /// Random locally administered MAC for a TAP port we create.
 fn random_mac() -> [u8; 6] {
     let mut mac = [0u8; 6];
-    let _ = getrandom::fill(&mut mac);
+    crate::secure::random_fill(&mut mac);
     mac[0] = 0x5E;
     mac
 }

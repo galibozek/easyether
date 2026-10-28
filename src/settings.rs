@@ -76,7 +76,7 @@ impl Settings {
             return mac;
         }
         let mut mac = [0u8; 6];
-        let _ = getrandom::fill(&mut mac);
+        crate::secure::random_fill(&mut mac);
         mac[0] = 0x5E; // unicast, locally administered
         self.client_mac = crate::l2::format_mac(&mac);
         self.save();

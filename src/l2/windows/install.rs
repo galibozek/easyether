@@ -319,7 +319,7 @@ fn install_neo() -> io::Result<bool> {
 /// recognisable connection name. Best effort: failures here are not fatal.
 fn configure_neo(instance_id: &str) {
     let mut mac = [0u8; 6];
-    let _ = getrandom::fill(&mut mac);
+    crate::secure::random_fill(&mut mac);
     mac[0] = 0x5E; // same locally-administered style prefix SoftEther uses
     let mac_str: String = mac.iter().map(|b| format!("{b:02X}")).collect();
     if reg::set_adapter_param(CLIENT_ADAPTER_NAME, "NetworkAddress", &mac_str).is_ok() && !instance_id.is_empty() {
