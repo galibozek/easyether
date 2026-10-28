@@ -27,12 +27,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-[target.'cfg(target_os = "linux")'.dependencies]
-# Native StatusNotifierItem tray over D-Bus (KDE, GNOME with AppIndicator extension, ...)
-ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
-
 [target.'cfg(not(target_os = "linux"))'.dependencies]
-# Tray on Windows/macOS, maintained by the Tauri team
+# Tray on Windows/macOS, maintained by the Tauri team (no tray on Linux, see gui/tray.rs)
 tray-icon = "0.26"
 
 [target.'cfg(windows)'.dependencies]

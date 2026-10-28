@@ -33,8 +33,6 @@ Usage:
 );
 
 fn main() {
-    #[cfg(target_os = "linux")]
-    sudo_session_bus();
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
         return run_gui();
@@ -55,21 +53,6 @@ fn main() {
     };
     console.finish();
     std::process::exit(code);
-}
-
-/// Under `sudo` the environment no longer points at the user's session D-Bus, which the tray
-/// needs. Restore the standard address (the tray thread then connects as that user, see
-/// gui/tray.rs). Runs first in `main`, while the process is still single-threaded.
-#[cfg(target_os = "linux")]
-fn sudo_session_bus() {
-    // SAFETY: geteuid has no preconditions.
-    if unsafe { libc::geteuid() } != 0 || std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some() {
-        return;
-    }
-    if let Some(uid) = std::env::var("SUDO_UID").ok().and_then(|u| u.parse::<u32>().ok()) {
-        // SAFETY: no other threads exist yet.
-        unsafe { std::env::set_var("DBUS_SESSION_BUS_ADDRESS", format!("unix:path=/run/user/{uid}/bus")) };
-    }
 }
 
 /// The Windows release build is a GUI program without a console. Command-line modes attach to

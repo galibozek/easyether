@@ -1,25 +1,45 @@
-//! System tray icon with "Open" and "Exit".
+//! System tray icon with "Open" and "Exit" (Windows/macOS, `tray-icon`). Minimizing the window
+//! hides it to the tray. On Windows the window is shown/hidden directly through its HWND,
+//! which also works while egui is not painting.
 //!
-//! * Windows/macOS: `tray-icon`. Minimizing the window hides it to the tray. On Windows the
-//!   window is shown/hidden directly through its HWND, which also works while egui is not
-//!   painting.
-//! * Linux (Wayland): `ksni` – a native StatusNotifierItem over D-Bus (what KDE and the GNOME
-//!   AppIndicator extension expect), no XEmbed/GTK. Wayland lets a program neither hide, show,
-//!   un-minimize nor focus its own window, so the tray here is a status icon with Exit; "Open"
-//!   asks the compositor for attention (taskbar highlight) and the user brings the window back.
+//! No tray on Linux: Wayland lets a program neither hide, show, un-minimize nor focus its own
+//! window, so a tray icon could only offer Exit, at the cost of a whole D-Bus stack. There the
+//! window stays in the taskbar; `Tray` has no values, so `Option<Tray>` is always `None`.
 //!
 //! Tray callbacks run on other threads; they only send a command and wake egui, and
 //! `App::logic` (which also runs while the window is hidden) acts on it.
 
+#[cfg(not(target_os = "linux"))]
 use std::sync::mpsc::{Receiver, Sender, channel};
 
+#[cfg(not(target_os = "linux"))]
 use eframe::egui;
 
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 pub enum TrayCmd {
     Open,
     Exit,
 }
 
+#[cfg(target_os = "linux")]
+pub enum Tray {}
+
+#[cfg(target_os = "linux")]
+impl Tray {
+    pub fn poll(&self) -> Option<TrayCmd> {
+        match *self {}
+    }
+
+    pub fn show_window(&self) {
+        match *self {}
+    }
+
+    pub fn hide_window(&self) {
+        match *self {}
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
 pub struct Tray {
     rx: Receiver<TrayCmd>,
     ctx: egui::Context,
@@ -28,6 +48,7 @@ pub struct Tray {
     _backend: Backend,
 }
 
+#[cfg(not(target_os = "linux"))]
 impl Tray {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Result<Tray, String> {
         let (tx, rx) = channel();
@@ -64,22 +85,13 @@ impl Tray {
                 SetForegroundWindow(hwnd);
             }
         }
-        #[cfg(not(target_os = "linux"))]
-        {
-            self.ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-            self.ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-            self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-        }
-        // Wayland: xdg-activation; the compositor highlights the window (or raises it, if the
-        // request carries a valid activation token).
-        #[cfg(target_os = "linux")]
-        self.ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
-            egui::UserAttentionType::Critical,
-        ));
+        self.ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        self.ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         self.ctx.request_repaint();
     }
 
-    /// Hides the window (minimize → tray). Not possible on Wayland, where this is a no-op.
+    /// Hides the window (minimize → tray).
     pub fn hide_window(&self) {
         #[cfg(windows)]
         {
@@ -87,134 +99,16 @@ impl Tray {
             // SAFETY: see show_window().
             unsafe { ShowWindow(self.hwnd as _, SW_HIDE) };
         }
-        #[cfg(not(any(windows, target_os = "linux")))]
+        #[cfg(not(windows))]
         self.ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 fn send(tx: &Sender<TrayCmd>, ctx: &egui::Context, cmd: TrayCmd) {
     let _ = tx.send(cmd);
     ctx.request_repaint();
 }
-
-// ----------------------------------------------------------------------------- Linux
-
-#[cfg(target_os = "linux")]
-struct Backend(#[allow(dead_code)] ksni::blocking::Handle<SniTray>);
-
-#[cfg(target_os = "linux")]
-struct SniTray {
-    tx: Sender<TrayCmd>,
-    ctx: egui::Context,
-    icon: Vec<ksni::Icon>,
-}
-
-#[cfg(target_os = "linux")]
-impl ksni::Tray for SniTray {
-    fn id(&self) -> String {
-        "easyether".into()
-    }
-
-    fn title(&self) -> String {
-        "EasyEther".into()
-    }
-
-    fn icon_pixmap(&self) -> Vec<ksni::Icon> {
-        self.icon.clone()
-    }
-
-    fn tool_tip(&self) -> ksni::ToolTip {
-        ksni::ToolTip {
-            title: "EasyEther".into(),
-            ..Default::default()
-        }
-    }
-
-    fn activate(&mut self, _x: i32, _y: i32) {
-        send(&self.tx, &self.ctx, TrayCmd::Open);
-    }
-
-    fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
-        use ksni::menu::StandardItem;
-        vec![
-            StandardItem {
-                label: "Open".into(),
-                activate: Box::new(|t: &mut Self| send(&t.tx, &t.ctx, TrayCmd::Open)),
-                ..Default::default()
-            }
-            .into(),
-            StandardItem {
-                label: "Exit".into(),
-                activate: Box::new(|t: &mut Self| send(&t.tx, &t.ctx, TrayCmd::Exit)),
-                ..Default::default()
-            }
-            .into(),
-        ]
-    }
-}
-
-#[cfg(target_os = "linux")]
-impl Backend {
-    fn start(tx: Sender<TrayCmd>, ctx: egui::Context) -> Result<Backend, String> {
-        use ksni::blocking::TrayMethods;
-        // SNI wants ARGB32 in network byte order.
-        let icon = crate::logo::rgba(64)
-            .map(|rgba| {
-                let data = rgba
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .flat_map(|p| [p[3], p[0], p[1], p[2]])
-                    .collect();
-                vec![ksni::Icon {
-                    width: 64,
-                    height: 64,
-                    data,
-                }]
-            })
-            .unwrap_or_default();
-        let tray = SniTray { tx, ctx, icon };
-        // The session bus only accepts its own user. When started with sudo, connect from a
-        // helper thread that switched (only itself) back to the invoking user; threads it
-        // spawns for the tray service inherit that identity. The rest of EasyEther keeps root.
-        let (done_tx, done_rx) = channel();
-        std::thread::spawn(move || {
-            if let Err(e) = become_sudo_user() {
-                let _ = done_tx.send(Err(e));
-                return;
-            }
-            let _ = done_tx.send(tray.spawn().map(Backend).map_err(|e| e.to_string()));
-        });
-        done_rx.recv().map_err(|e| e.to_string())?
-    }
-}
-
-/// For the calling thread only (raw syscalls; glibc's setuid would change every thread).
-#[cfg(target_os = "linux")]
-fn become_sudo_user() -> Result<(), String> {
-    // SAFETY: geteuid has no preconditions.
-    if unsafe { libc::geteuid() } != 0 {
-        return Ok(());
-    }
-    let id = |name| std::env::var(name).ok().and_then(|v| v.parse::<libc::uid_t>().ok());
-    let (Some(uid), Some(gid)) = (id("SUDO_UID"), id("SUDO_GID")) else {
-        return Ok(());
-    };
-    // SAFETY: plain credential syscalls affecting only this thread.
-    unsafe {
-        if libc::syscall(libc::SYS_setresgid, gid, gid, gid) != 0
-            || libc::syscall(libc::SYS_setresuid, uid, uid, uid) != 0
-        {
-            return Err(format!(
-                "cannot switch the tray thread to uid {uid}: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-    }
-    Ok(())
-}
-
-// ----------------------------------------------------------------------------- Windows / macOS
 
 #[cfg(not(target_os = "linux"))]
 struct Backend(#[allow(dead_code)] tray_icon::TrayIcon);

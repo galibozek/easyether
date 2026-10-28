@@ -64,6 +64,7 @@ impl App {
         };
         let server = ServerTab::new(&cc.egui_ctx, &settings);
         let driver_prompt = server.missing_drivers();
+        #[cfg(not(target_os = "linux"))]
         let tray = match tray::Tray::new(cc) {
             Ok(t) => Some(t),
             Err(e) => {
@@ -71,6 +72,8 @@ impl App {
                 None
             }
         };
+        #[cfg(target_os = "linux")]
+        let tray = None;
         App {
             tray,
             tray_hint_shown: false,
@@ -306,9 +309,8 @@ impl eframe::App for App {
             }
         }
 
-        // Minimizing hides the window to the tray (it keeps running). Wayland neither reports
-        // `minimized` (always None) nor lets a window hide, so there it stays a plain minimize
-        // and the tray is a status icon with Exit (see tray.rs).
+        // Minimizing hides the window to the tray (it keeps running). No tray on Linux, where
+        // it stays a plain minimize (see tray.rs).
         let minimized = ctx.input(|i| i.viewport().minimized) == Some(true);
         if minimized
             && !self.was_minimized

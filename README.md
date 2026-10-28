@@ -32,8 +32,8 @@ Typical use: a car in the workshop, a diagnostic laptop at home or in another br
 - **Live status**: throughput per direction on the tabs, detailed log with copy/clear.
 - **IPv4 and IPv6**: the server listens on both; the client accepts host names and IPv4/IPv6
   literals, including link-local with a zone (`fe80::1%eth0`, `fe80::1%12`).
-- **Desktop app**: Windows x64/x86 and Linux (Wayland), light/dark theme, system tray (on Windows
-  minimizing hides the window to it), confirmations before anything disruptive, optional static IPv4 on
+- **Desktop app**: Windows x64/x86 and Linux (Wayland), light/dark theme, system tray on Windows
+  (minimizing hides the window to it), confirmations before anything disruptive, optional static IPv4 on
   the client adapter, and a command-line mode for headless use.
 - **No kernel code of our own**: Windows uses SoftEther VPN's signed `SeLow`/`Neo6` drivers
   (bundled, unmodified); Linux uses `AF_PACKET`/TAP and asks for privileges through polkit only
@@ -75,10 +75,9 @@ start. The drivers it installs are signed by the SoftEther project.
    169.254.x.x when no DHCP server answers.
 3. Start the diagnostic software and select that adapter, as if the cable were plugged in locally.
 
-Closing the window exits; while a tunnel is active it asks for confirmation first. A tray icon
-(**Open** / **Exit**) shows that EasyEther is running; on Windows, minimizing hides the window to
-the tray. On Linux (Wayland) a program cannot hide or raise its own window, so minimize is a plain
-minimize and **Open** only highlights the window in the taskbar.
+Closing the window exits; while a tunnel is active it asks for confirmation first. On Windows,
+minimizing hides EasyEther in the system tray (**Open** / **Exit**). Linux has no tray icon:
+Wayland does not let a program hide or raise its own window, so it stays in the taskbar.
 
 ## How it works
 
@@ -157,7 +156,7 @@ src/tunnel.rs      server/client workers, sessions, reconnect, abuse limits
 src/secure.rs      TLS + SPAKE2 handshake, SecureStream
 src/proto.rs       wire protocol (hello, frame batches, Close)
 src/l2/            adapters: linux/ (AF_PACKET, TAP, pkexec helper), windows/ (SeLow, Neo6, install)
-src/gui/           egui front-end, tray
+src/gui/           egui front-end, tray (Windows)
 drivers/           SoftEther SeLow/Neo6 driver packages (x64, x86) + install/uninstall .bat
 ```
 
@@ -174,8 +173,6 @@ drivers/           SoftEther SeLow/Neo6 driver packages (x64, x86) + install/uni
 - **Linux, no polkit dialog / "pkexec not found"**: install polkit, or grant the binary
   capabilities once: `sudo setcap cap_net_admin,cap_net_raw+ep <path to easyether>`. Automatic
   IPv4 (`dhcpcd` runs as root) still needs polkit; with capabilities alone use a static IPv4.
-- **No tray icon on Linux**: the tray needs a StatusNotifier host (KDE, or GNOME with the
-  AppIndicator extension) and the user's session D-Bus; do not run with `sudo`.
 - **Client gets an address but cannot reach the remote device**: the remote network may use
   the same subnet as your LAN. The LAN always wins (on Linux the `eeth0` route gets metric
   9000), so you never cut yourself off; use a static IPv4 in another range on both ends, or
@@ -203,5 +200,5 @@ Apache License 2.0 ([`drivers/LICENSE-SoftEther.txt`](drivers/LICENSE-SoftEther.
 Main libraries: [egui/eframe](https://github.com/emilk/egui), [rustls](https://github.com/rustls/rustls),
 [rcgen](https://github.com/rustls/rcgen), [spake2](https://github.com/RustCrypto/PAKEs),
 [socket2](https://github.com/rust-lang/socket2), [tray-icon](https://github.com/tauri-apps/tray-icon),
-[ksni](https://github.com/iovxw/ksni), [windows-sys](https://github.com/microsoft/windows-rs),
+[windows-sys](https://github.com/microsoft/windows-rs),
 [resvg](https://github.com/linebender/resvg) (build-time logo rendering).
