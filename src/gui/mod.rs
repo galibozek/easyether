@@ -42,6 +42,8 @@ pub struct App {
     driver_prompt: Vec<&'static str>,
     tray: Option<tray::Tray>,
     tray_hint_shown: bool,
+    /// Whether the window was minimized in the previous frame (minimize → tray).
+    was_minimized: bool,
     /// "Cannot exit while drivers are being installed" notice.
     install_notice: bool,
 }
@@ -65,16 +67,14 @@ impl App {
         let tray = match tray::Tray::new(cc) {
             Ok(t) => Some(t),
             Err(e) => {
-                server
-                    .worker
-                    .logger
-                    .warn(format!("No system tray available ({e}); closing the window will quit."));
+                server.worker.logger.warn(format!("No system tray available ({e})."));
                 None
             }
         };
         App {
             tray,
             tray_hint_shown: false,
+            was_minimized: false,
             install_notice: false,
             client: ClientTab::new(&cc.egui_ctx, &settings),
             server,
@@ -91,7 +91,7 @@ impl App {
         self.server.is_running() || self.client.is_running()
     }
 
-    /// Exit from the tray menu: confirm first if a tunnel is active.
+    /// Exit (window X or the tray menu): confirm first if a tunnel is active.
     fn request_exit(&mut self, ctx: &egui::Context) {
         if self.server.is_installing() {
             if let Some(t) = &self.tray {
@@ -306,23 +306,29 @@ impl eframe::App for App {
             }
         }
 
-        // The window's X hides to the tray; Exit is in the tray menu.
-        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close {
-            if let Some(tray) = &self.tray {
-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                tray.hide_window();
-                if !self.tray_hint_shown {
-                    self.tray_hint_shown = true;
-                    self.server
-                        .worker
-                        .logger
-                        .info("EasyEther keeps running in the system tray (tray menu: Open / Exit).");
-                }
-            } else {
-                // No tray: X quits, with the same safeguards as the tray's Exit.
-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                self.request_exit(ctx);
+        // Minimizing hides the window to the tray (it keeps running). Wayland neither reports
+        // `minimized` (always None) nor lets a window hide, so there it stays a plain minimize
+        // and the tray is a status icon with Exit (see tray.rs).
+        let minimized = ctx.input(|i| i.viewport().minimized) == Some(true);
+        if minimized
+            && !self.was_minimized
+            && let Some(tray) = &self.tray
+        {
+            tray.hide_window();
+            if !self.tray_hint_shown {
+                self.tray_hint_shown = true;
+                self.server
+                    .worker
+                    .logger
+                    .info("EasyEther keeps running in the system tray (tray menu: Open / Exit).");
             }
+        }
+        self.was_minimized = minimized;
+
+        // The window's X exits, asking first while a tunnel is active.
+        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.request_exit(ctx);
         }
     }
 

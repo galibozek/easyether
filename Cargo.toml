@@ -6,9 +6,10 @@ description = "Peer-to-peer Ethernet (L2) sharing over LAN, using SoftEther SeLo
 license = "GPL-3.0-or-later"
 
 [dependencies]
-# GUI: egui with the OpenGL (glow) renderer – small and portable, no wgpu/DirectX stack
+# GUI: egui with the OpenGL (glow) renderer – small and portable, no wgpu/DirectX stack.
+# Linux is Wayland-only; no accesskit (its winit integration would pull the X11 backend back in).
 eframe = { version = "0.37", default-features = false, features = [
-    "accesskit", "clipboard", "default_fonts", "glow", "wayland", "x11",
+    "clipboard", "default_fonts", "glow", "wayland",
 ] }
 # Networking and security
 socket2 = { version = "0.6", features = ["all"] }
@@ -30,8 +31,6 @@ libc = "0.2"
 [target.'cfg(target_os = "linux")'.dependencies]
 # Native StatusNotifierItem tray over D-Bus (KDE, GNOME with AppIndicator extension, ...)
 ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
-# Same winit as eframe; used to select the X11 backend (Wayland cannot hide a window to the tray)
-winit = { version = "0.30", default-features = false, features = ["x11"] }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 # Tray on Windows/macOS, maintained by the Tauri team

@@ -32,8 +32,8 @@ Typical use: a car in the workshop, a diagnostic laptop at home or in another br
 - **Live status**: throughput per direction on the tabs, detailed log with copy/clear.
 - **IPv4 and IPv6**: the server listens on both; the client accepts host names and IPv4/IPv6
   literals, including link-local with a zone (`fe80::1%eth0`, `fe80::1%12`).
-- **Desktop app**: Windows x64/x86 and Linux, light/dark theme, system tray (closing the window
-  keeps the tunnel running), confirmations before anything disruptive, optional static IPv4 on
+- **Desktop app**: Windows x64/x86 and Linux (Wayland), light/dark theme, system tray (on Windows
+  minimizing hides the window to it), confirmations before anything disruptive, optional static IPv4 on
   the client adapter, and a command-line mode for headless use.
 - **No kernel code of our own**: Windows uses SoftEther VPN's signed `SeLow`/`Neo6` drivers
   (bundled, unmodified); Linux uses `AF_PACKET`/TAP and asks for privileges through polkit only
@@ -72,7 +72,10 @@ start. The drivers it installs are signed by the SoftEther project.
    the remote network. Use DHCP, link-local, or set a static IPv4 under **Network settings**.
 3. Start the diagnostic software and select that adapter, as if the cable were plugged in locally.
 
-Closing the window hides EasyEther in the system tray; **Exit** is in the tray menu.
+Closing the window exits; while a tunnel is active it asks for confirmation first. A tray icon
+(**Open** / **Exit**) shows that EasyEther is running; on Windows, minimizing hides the window to
+the tray. On Linux (Wayland) a program cannot hide or raise its own window, so minimize is a plain
+minimize and **Open** only highlights the window in the taskbar.
 
 ## How it works
 
@@ -167,8 +170,10 @@ drivers/           SoftEther SeLow/Neo6 driver packages (x64, x86) + install/uni
   a restart may be needed once. `drivers\uninstall-drivers.bat` removes them.
 - **Linux, no polkit dialog / "pkexec not found"**: install polkit, or grant the binary
   capabilities once: `sudo setcap cap_net_admin,cap_net_raw+ep <path to easyether>`.
-- **Window does not hide to the tray on Linux**: the tray needs a StatusNotifier host (KDE, or
-  GNOME with the AppIndicator extension) and the user's session D-Bus; do not run with `sudo`.
+- **No tray icon on Linux**: the tray needs a StatusNotifier host (KDE, or GNOME with the
+  AppIndicator extension) and the user's session D-Bus; do not run with `sudo`.
+- **Linux needs Wayland**: the Linux build has no X11 backend. On an X11 desktop run it under a
+  Wayland session (or a nested compositor).
 
 ## Contributing
 

@@ -1,9 +1,12 @@
-//! System tray icon with "Open" and "Exit". Closing the window hides it to the tray.
+//! System tray icon with "Open" and "Exit".
 //!
-//! * Linux: `ksni` – a native StatusNotifierItem over D-Bus (what KDE and the GNOME
-//!   AppIndicator extension expect), no XEmbed/GTK.
-//! * Windows/macOS: `tray-icon`. On Windows the window is shown/hidden directly through its
-//!   HWND, which also works while egui is not painting.
+//! * Windows/macOS: `tray-icon`. Minimizing the window hides it to the tray. On Windows the
+//!   window is shown/hidden directly through its HWND, which also works while egui is not
+//!   painting.
+//! * Linux (Wayland): `ksni` – a native StatusNotifierItem over D-Bus (what KDE and the GNOME
+//!   AppIndicator extension expect), no XEmbed/GTK. Wayland lets a program neither hide, show,
+//!   un-minimize nor focus its own window, so the tray here is a status icon with Exit; "Open"
+//!   asks the compositor for attention (taskbar highlight) and the user brings the window back.
 //!
 //! Tray callbacks run on other threads; they only send a command and wake egui, and
 //! `App::logic` (which also runs while the window is hidden) acts on it.
@@ -61,12 +64,22 @@ impl Tray {
                 SetForegroundWindow(hwnd);
             }
         }
-        self.ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-        self.ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-        self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            self.ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+        // Wayland: xdg-activation; the compositor highlights the window (or raises it, if the
+        // request carries a valid activation token).
+        #[cfg(target_os = "linux")]
+        self.ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+            egui::UserAttentionType::Critical,
+        ));
         self.ctx.request_repaint();
     }
 
+    /// Hides the window (minimize → tray). Not possible on Wayland, where this is a no-op.
     pub fn hide_window(&self) {
         #[cfg(windows)]
         {
@@ -74,7 +87,7 @@ impl Tray {
             // SAFETY: see show_window().
             unsafe { ShowWindow(self.hwnd as _, SW_HIDE) };
         }
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "linux")))]
         self.ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
     }
 }

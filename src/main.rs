@@ -118,20 +118,10 @@ fn run_gui() {
             height: 256,
         }));
     }
-    #[allow(unused_mut)]
-    let mut options = eframe::NativeOptions {
+    let options = eframe::NativeOptions {
         viewport,
         ..Default::default()
     };
-    // Wayland does not let a program hide its window, which "close to tray" needs, so prefer
-    // X11 (XWayland) when it is available. EASYETHER_WAYLAND=1 keeps native Wayland.
-    #[cfg(target_os = "linux")]
-    if std::env::var_os("DISPLAY").is_some() && std::env::var_os("EASYETHER_WAYLAND").is_none() {
-        options.event_loop_builder = Some(Box::new(|builder| {
-            use winit::platform::x11::EventLoopBuilderExtX11;
-            builder.with_x11();
-        }));
-    }
     if let Err(e) = eframe::run_native("EasyEther", options, Box::new(|cc| Ok(Box::new(gui::App::new(cc))))) {
         eprintln!("EasyEther: {e}");
         std::process::exit(1);
