@@ -319,10 +319,14 @@ impl eframe::App for App {
             tray.hide_window();
             if !self.tray_hint_shown {
                 self.tray_hint_shown = true;
-                self.server
-                    .worker
-                    .logger
-                    .info("EasyEther keeps running in the system tray (tray menu: Open / Exit).");
+                let hint = "EasyEther keeps running in the system tray.";
+                // A passing notification where the tray supports it; the log otherwise.
+                if let Err(e) = tray.notify(hint) {
+                    self.server
+                        .worker
+                        .logger
+                        .info(format!("{hint} (no tray notification: {e})"));
+                }
             }
         }
         self.was_minimized = minimized;

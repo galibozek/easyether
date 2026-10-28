@@ -37,6 +37,10 @@ impl Tray {
     pub fn hide_window(&self) {
         match *self {}
     }
+
+    pub fn notify(&self, _text: &str) -> Result<(), String> {
+        match *self {}
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -45,7 +49,10 @@ pub struct Tray {
     ctx: egui::Context,
     #[cfg(windows)]
     hwnd: isize,
-    _backend: Backend,
+    /// Explorer's id of our tray icon (see find_icon_id), for balloon notifications.
+    #[cfg(windows)]
+    icon_id: Option<u32>,
+    backend: Backend,
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -63,6 +70,8 @@ impl Tray {
         Ok(Tray {
             rx,
             #[cfg(windows)]
+            icon_id: find_icon_id(backend.0.window_handle()),
+            #[cfg(windows)]
             hwnd: {
                 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
                 match cc.window_handle().map_err(|e| e.to_string())?.as_raw() {
@@ -71,7 +80,7 @@ impl Tray {
                 }
             },
             ctx,
-            _backend: backend,
+            backend,
         })
     }
 
@@ -108,6 +117,74 @@ impl Tray {
         #[cfg(not(windows))]
         self.ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
     }
+
+    /// A short notification at the tray icon that disappears by itself (Windows balloon).
+    /// The error says why it could not be shown, so the caller can log instead.
+    pub fn notify(&self, text: &str) -> Result<(), String> {
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::UI::Shell::{NIF_INFO, NIIF_INFO, NIM_MODIFY, Shell_NotifyIconW};
+            let Some(id) = self.icon_id else {
+                return Err("tray icon id unknown".into());
+            };
+            let mut nid = notify_icon_data(self.backend.0.window_handle(), id);
+            nid.uFlags = NIF_INFO;
+            nid.dwInfoFlags = NIIF_INFO;
+            nid.szInfoTitle = utf16("EasyEther");
+            nid.szInfo = utf16(text);
+            // SAFETY: nid is fully initialised and refers to the icon tray-icon registered.
+            if unsafe { Shell_NotifyIconW(NIM_MODIFY, &nid) } == 0 {
+                return Err(std::io::Error::last_os_error().to_string());
+            }
+            Ok(())
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = text;
+            Err("no tray notifications on this platform".into())
+        }
+    }
+}
+
+/// `NOTIFYICONDATAW` addressing the icon `id` on `hwnd`.
+#[cfg(windows)]
+fn notify_icon_data(
+    hwnd: windows_sys::Win32::Foundation::HWND,
+    id: u32,
+) -> windows_sys::Win32::UI::Shell::NOTIFYICONDATAW {
+    use windows_sys::Win32::UI::Shell::NOTIFYICONDATAW;
+    // SAFETY: NOTIFYICONDATAW is plain data; all-zero is valid before the fields are set.
+    let mut nid: NOTIFYICONDATAW = unsafe { std::mem::zeroed() };
+    nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+    nid.hWnd = hwnd;
+    nid.uID = id;
+    nid
+}
+
+/// The id under which tray-icon registered its icon with Explorer. The library keeps it
+/// private (and takes it from a counter shared with other ids), so find it by probing:
+/// Explorer accepts a tooltip change only for an icon that exists on the window.
+#[cfg(windows)]
+fn find_icon_id(hwnd: windows_sys::Win32::Foundation::HWND) -> Option<u32> {
+    use windows_sys::Win32::UI::Shell::{NIF_TIP, NIM_MODIFY, Shell_NotifyIconW};
+    (1..=16).find(|&id| {
+        let mut nid = notify_icon_data(hwnd, id);
+        nid.uFlags = NIF_TIP;
+        nid.szTip = utf16("EasyEther");
+        // SAFETY: nid is fully initialised; a wrong id only makes the call fail.
+        unsafe { Shell_NotifyIconW(NIM_MODIFY, &nid) != 0 }
+    })
+}
+
+/// NUL-terminated, truncated to the field. Built as a value: NOTIFYICONDATAW is packed on
+/// x86, so its fields cannot be borrowed.
+#[cfg(windows)]
+fn utf16<const N: usize>(s: &str) -> [u16; N] {
+    let mut out = [0u16; N];
+    for (d, c) in out.iter_mut().zip(s.encode_utf16().take(N - 1)) {
+        *d = c;
+    }
+    out
 }
 
 #[cfg(not(target_os = "linux"))]
