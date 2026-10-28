@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1A8F80"/>
+      <stop offset="1" stop-color="#0D5248"/>
+    </linearGradient>
+  </defs>
+  <!-- background -->
+  <rect x="8" y="8" width="240" height="240" rx="52" fill="url(#bg)"/>
+
+  <!-- left Ethernet port -->
+  <rect x="26" y="78" width="78" height="100" rx="14" fill="#FFFFFF"/>
+  <path d="M42 100 h46 v40 h-10 v12 h-26 v-12 h-10 z" fill="#0D5248"/>
+  <g fill="#F5B53F">
+    <rect x="48" y="104" width="4" height="12"/>
+    <rect x="56" y="104" width="4" height="12"/>
+    <rect x="64" y="104" width="4" height="12"/>
+    <rect x="72" y="104" width="4" height="12"/>
+    <rect x="80" y="104" width="4" height="12"/>
+  </g>
+
+  <!-- right Ethernet port -->
+  <rect x="152" y="78" width="78" height="100" rx="14" fill="#FFFFFF"/>
+  <path d="M168 100 h46 v40 h-10 v12 h-26 v-12 h-10 z" fill="#0D5248"/>
+  <g fill="#F5B53F">
+    <rect x="174" y="104" width="4" height="12"/>
+    <rect x="182" y="104" width="4" height="12"/>
+    <rect x="190" y="104" width="4" height="12"/>
+    <rect x="198" y="104" width="4" height="12"/>
+    <rect x="206" y="104" width="4" height="12"/>
+  </g>
+
+  <!-- two-way link -->
+  <g fill="#F5B53F">
+    <rect x="108" y="104" width="30" height="10" rx="3"/>
+    <path d="M136 96 l14 13 l-14 13 z"/>
+    <rect x="118" y="142" width="30" height="10" rx="3"/>
+    <path d="M120 134 l-14 13 l14 13 z"/>
+  </g>
+
+  <!-- "cable" underline -->
+  <rect x="40" y="198" width="176" height="12" rx="6" fill="#FFFFFF" opacity="0.35"/>
+</svg>
