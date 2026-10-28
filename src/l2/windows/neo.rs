@@ -4,7 +4,7 @@
 use std::io;
 
 use super::ffi;
-use super::{CLIENT_ADAPTER_NAME, DevicePort, NEO_INSTANCE};
+use super::{CLIENT_ADAPTER_NAME, DevicePort, NEO_HWID, NEO_INSTANCE};
 use crate::l2::L2Port;
 use crate::log::Logger;
 
@@ -15,7 +15,7 @@ fn device_path() -> String {
 /// True when the adapter exists. Checked in the registry: opening the device would
 /// briefly signal "cable connected" to Windows.
 pub fn is_installed() -> bool {
-    super::reg::guid_by_desc(CLIENT_ADAPTER_NAME).is_some()
+    super::reg::guid_by_component(NEO_HWID).is_some()
 }
 
 pub fn open(log: &Logger) -> io::Result<DevicePort> {

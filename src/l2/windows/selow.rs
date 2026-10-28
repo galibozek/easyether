@@ -49,6 +49,7 @@ fn read_list() -> io::Result<SeLowAdapterList> {
 
 pub fn list_adapters() -> io::Result<Vec<AdapterInfo>> {
     let list = read_list()?;
+    let own = reg::guid_by_component(super::NEO_HWID);
     let mut out: Vec<AdapterInfo> = list
         .adapters
         .iter()
@@ -72,8 +73,11 @@ pub fn list_adapters() -> io::Result<Vec<AdapterInfo>> {
                 detail: format_mac(&a.mac),
             }
         })
-        // Never offer our own client adapter (or other SoftEther virtual adapters).
-        .filter(|a| !a.name.contains("VPN Client Adapter"))
+        // Never offer our own client adapter (renamed, so matched by GUID) or other SoftEther
+        // virtual adapters.
+        .filter(|a| {
+            !own.as_deref().is_some_and(|g| a.id.eq_ignore_ascii_case(g)) && !a.name.contains("VPN Client Adapter")
+        })
         .collect();
     out.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(out)

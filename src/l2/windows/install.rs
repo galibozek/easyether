@@ -8,7 +8,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use super::ffi::{self, GUID, HDEVINFO, devinfo_data, wide};
-use super::{CLIENT_ADAPTER_NAME, NEO_INSTANCE, neo, reg, selow};
+use super::{CLIENT_ADAPTER_NAME, NEO_HWID, NEO_INSTANCE, neo, reg, selow};
 use crate::log::Logger;
 
 pub struct DriverStatus {
@@ -244,11 +244,10 @@ fn install_neo() -> io::Result<bool> {
             format!("{} not found", inf.display()),
         ));
     }
-    let hwid = format!("NeoAdapter_{NEO_INSTANCE}");
-    remove_devices(&hwid)?;
+    remove_devices(NEO_HWID)?;
 
     let inf_w = wide(&inf.to_string_lossy());
-    let hwid_w = wide(&hwid);
+    let hwid_w = wide(NEO_HWID);
     let instance_id;
     let mut reboot = 0;
     // SAFETY: SetupAPI calls with valid arguments; buffers outlive the calls.
@@ -316,6 +315,19 @@ fn install_neo() -> io::Result<bool> {
                 format!("UpdateDriverForPlugAndPlayDevices: {e}"),
             ));
         }
+        // The signed INF names the device "VPN Client Adapter - VPN127". The installed device's
+        // description and friendly name are plain properties, not part of the signed package;
+        // Device Manager shows them. Best effort. (DriverDesc: see configure_neo.)
+        let name = wide(CLIENT_ADAPTER_NAME);
+        for prop in [ffi::SPDRP_DEVICEDESC, ffi::SPDRP_FRIENDLYNAME] {
+            ffi::SetupDiSetDeviceRegistryPropertyW(
+                set.0,
+                &mut data,
+                prop,
+                name.as_ptr().cast(),
+                (name.len() * 2) as u32,
+            );
+        }
         let mut id = [0u16; 512];
         ffi::SetupDiGetDeviceInstanceIdW(set.0, &data, id.as_mut_ptr(), id.len() as u32, std::ptr::null_mut());
         let end = id.iter().position(|&c| c == 0).unwrap_or(id.len());
@@ -325,34 +337,38 @@ fn install_neo() -> io::Result<bool> {
     Ok(reboot != 0)
 }
 
-/// Gives the adapter a stable MAC (the driver default changes on every load) and a
+/// Gives the adapter a stable MAC (the driver default changes on every load), our name and a
 /// recognisable connection name. Best effort: failures here are not fatal.
 fn configure_neo(instance_id: &str) {
     let mut mac = [0u8; 6];
     crate::secure::random_fill(&mut mac);
     mac[0] = 0x5E; // same locally-administered style prefix SoftEther uses
     let mac_str: String = mac.iter().map(|b| format!("{b:02X}")).collect();
-    if reg::set_adapter_param(CLIENT_ADAPTER_NAME, "NetworkAddress", &mac_str).is_ok() && !instance_id.is_empty() {
+    let mac_ok = reg::set_adapter_param(NEO_HWID, "NetworkAddress", &mac_str).is_ok();
+    // DriverDesc is what NDIS reports as the interface description (Network Connections,
+    // ipconfig, Get-NetAdapter, diagnostic software); it takes effect when the device restarts.
+    let name_ok = reg::set_adapter_param(NEO_HWID, "DriverDesc", CLIENT_ADAPTER_NAME).is_ok();
+    if (mac_ok || name_ok) && !instance_id.is_empty() {
         let _ = run("pnputil.exe", &["/restart-device", instance_id]);
     }
     // The connection appears a moment after installation.
     for _ in 0..20 {
-        if let Some(guid) = reg::guid_by_desc(CLIENT_ADAPTER_NAME) {
-            if let Some(old) = reg::connection_name(&guid) {
-                if old != "EasyEther" {
-                    let _ = run(
-                        "netsh.exe",
-                        &[
-                            "interface",
-                            "set",
-                            "interface",
-                            &format!("name={old}"),
-                            "newname=EasyEther",
-                        ],
-                    );
-                }
-                return;
+        if let Some(guid) = reg::guid_by_component(NEO_HWID)
+            && let Some(old) = reg::connection_name(&guid)
+        {
+            if old != "EasyEther" {
+                let _ = run(
+                    "netsh.exe",
+                    &[
+                        "interface",
+                        "set",
+                        "interface",
+                        &format!("name={old}"),
+                        "newname=EasyEther",
+                    ],
+                );
             }
+            return;
         }
         std::thread::sleep(Duration::from_millis(250));
     }

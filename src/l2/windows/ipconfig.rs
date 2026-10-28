@@ -8,7 +8,7 @@ use windows_sys::Win32::NetworkManagement::Ndis::NET_LUID_LH;
 use windows_sys::Win32::Networking::WinSock::{AF_INET, IpDadStatePreferred};
 
 use super::ffi::{self, MIB_UNICASTIPADDRESS_ROW};
-use super::{CLIENT_ADAPTER_NAME, reg};
+use super::{CLIENT_ADAPTER_NAME, NEO_HWID, reg};
 use crate::log::Logger;
 
 struct AddressGuard {
@@ -29,7 +29,7 @@ impl Drop for AddressGuard {
 }
 
 pub fn apply(addr: Ipv4Addr, prefix: u8, log: &Logger) -> io::Result<Box<dyn Send>> {
-    let guid_str = reg::guid_by_desc(CLIENT_ADAPTER_NAME)
+    let guid_str = reg::guid_by_component(NEO_HWID)
         .ok_or_else(|| io::Error::other(format!("'{CLIENT_ADAPTER_NAME}' not found")))?;
     let guid = ffi::parse_guid(&guid_str).ok_or_else(|| io::Error::other("invalid adapter GUID"))?;
     // SAFETY: NET_LUID_LH is a plain union; zero is valid.

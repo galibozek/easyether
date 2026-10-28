@@ -21,7 +21,11 @@ use crate::log::Logger;
 use ffi::Handle;
 
 pub const NEO_INSTANCE: &str = "VPN127";
-pub const CLIENT_ADAPTER_NAME: &str = "VPN Client Adapter - VPN127";
+/// Hardware id of the virtual adapter (from the INF); how we find it in the registry.
+pub const NEO_HWID: &str = "NeoAdapter_VPN127";
+/// Shown name of the virtual adapter. The signed INF calls it "VPN Client Adapter - VPN127";
+/// the installer renames it (see install::configure_neo).
+pub const CLIENT_ADAPTER_NAME: &str = "EasyEther Adapter";
 
 pub fn list_adapters() -> io::Result<Vec<AdapterInfo>> {
     selow::list_adapters()
