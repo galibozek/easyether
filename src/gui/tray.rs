@@ -53,6 +53,12 @@ impl Tray {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Result<Tray, String> {
         let (tx, rx) = channel();
         let ctx = cc.egui_ctx.clone();
+        // A second start of EasyEther asks us to show the window; same path as tray "Open".
+        #[cfg(windows)]
+        {
+            let (tx, ctx) = (tx.clone(), ctx.clone());
+            crate::instance::on_show_request(move || send(&tx, &ctx, TrayCmd::Open));
+        }
         let backend = Backend::start(tx, ctx.clone())?;
         Ok(Tray {
             rx,

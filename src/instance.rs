@@ -67,11 +67,11 @@ pub fn acquire() -> io::Result<Option<Lock>> {
     }
 }
 
-/// What a second start does: raise the running window where the OS allows it, otherwise
-/// show a short notice.
+/// What a second start does: ask the running instance to show its window where that works
+/// (Windows), otherwise show a short notice.
 pub fn already_running() {
     #[cfg(windows)]
-    if raise_existing() {
+    if request_show() {
         return;
     }
     eprintln!("EasyEther is already running.");
@@ -95,23 +95,63 @@ pub fn already_running() {
     });
 }
 
-/// Shows and focuses the running instance's window, also when it is hidden in the tray
-/// (the same calls as gui/tray.rs uses from inside).
+/// Windows ignores ShowWindow/SetForegroundWindow from another process, so the running
+/// instance has to show its window itself: a second start signals this named event.
 #[cfg(windows)]
-fn raise_existing() -> bool {
+const SHOW_EVENT: &str = "Global\\EasyEther.Show";
+
+#[cfg(windows)]
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// First instance: calls `wake` (from a background thread) whenever a later start asks for
+/// the window. The caller then shows the window from its own event loop.
+#[cfg(windows)]
+pub fn on_show_request(wake: impl Fn() + Send + 'static) {
+    use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+    use windows_sys::Win32::System::Threading::{CreateEventW, INFINITE, WaitForSingleObject};
+    let name = wide(SHOW_EVENT);
+    // SAFETY: name is NUL-terminated; an auto-reset event, initially not signalled.
+    let event = unsafe { CreateEventW(std::ptr::null(), 0, 0, name.as_ptr()) };
+    if event.is_null() {
+        return;
+    }
+    let event = event as isize;
+    std::thread::spawn(move || {
+        // SAFETY: the event handle stays open for the program's lifetime.
+        while unsafe { WaitForSingleObject(event as _, INFINITE) } == WAIT_OBJECT_0 {
+            wake();
+        }
+    });
+}
+
+/// Second start: signals the running instance and lets it take the foreground (a freshly
+/// started program may do that itself and may pass the right on). False without a running
+/// instance that listens.
+#[cfg(windows)]
+fn request_show() -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{EVENT_MODIFY_STATE, OpenEventW, SetEvent};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        FindWindowW, SW_RESTORE, SW_SHOW, SetForegroundWindow, ShowWindow,
+        AllowSetForegroundWindow, FindWindowW, GetWindowThreadProcessId,
     };
-    let title: Vec<u16> = "EasyEther".encode_utf16().chain(std::iter::once(0)).collect();
-    // SAFETY: title is NUL-terminated; the window handle is only used for these calls.
+    let name = wide(SHOW_EVENT);
+    let title = wide("EasyEther");
+    // SAFETY: names are NUL-terminated; the handles are only used here and closed.
     unsafe {
-        let hwnd = FindWindowW(std::ptr::null(), title.as_ptr());
-        if hwnd.is_null() {
+        let event = OpenEventW(EVENT_MODIFY_STATE, 0, name.as_ptr());
+        if event.is_null() {
             return false;
         }
-        ShowWindow(hwnd, SW_SHOW);
-        ShowWindow(hwnd, SW_RESTORE);
-        SetForegroundWindow(hwnd);
+        let hwnd = FindWindowW(std::ptr::null(), title.as_ptr());
+        if !hwnd.is_null() {
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, &mut pid);
+            AllowSetForegroundWindow(pid);
+        }
+        let ok = SetEvent(event) != 0;
+        CloseHandle(event);
+        ok
     }
-    true
 }
