@@ -12,6 +12,11 @@ use crate::log::Logger;
 use crate::proto::{MAX_BATCH, MAX_FRAME, MIN_FRAME};
 
 const PACKET_IGNORE_OUTGOING: libc::c_int = 23;
+/// Smallest Ethernet frame (without FCS). A NIC pads shorter frames in hardware, but a raw
+/// socket rejects anything shorter than the device's `hard_header_len` with EINVAL, and USB
+/// drivers raise that above 14 by their TX header (rndis_host 58, lan78xx/smsc95xx 22,
+/// asix 18). A 42-byte ARP request from the peer would never get out otherwise.
+const MIN_ETH_FRAME: usize = 60;
 const TP_STATUS_VLAN_VALID: u32 = 1 << 4;
 const TP_STATUS_VLAN_TPID_VALID: u32 = 1 << 6;
 
@@ -33,6 +38,7 @@ pub struct PacketPort {
     /// Offload settings to put back when the port closes.
     restore: Option<Offload>,
     warned_oversized: std::sync::atomic::AtomicBool,
+    warned_rejected: std::sync::atomic::AtomicBool,
 }
 
 impl Drop for PacketPort {
@@ -207,6 +213,7 @@ impl PacketPort {
             log: log.clone(),
             restore,
             warned_oversized: std::sync::atomic::AtomicBool::new(false),
+            warned_rejected: std::sync::atomic::AtomicBool::new(false),
         };
         port.drain();
         log.info(format!("Raw socket opened on '{ifname}' (promiscuous mode)."));
@@ -307,13 +314,31 @@ impl L2Port for PacketPort {
     }
 
     fn send(&self, frames: &[Vec<u8>]) -> io::Result<()> {
+        let mut padded = [0u8; MIN_ETH_FRAME];
         for f in frames {
-            // SAFETY: f is a valid buffer of f.len() bytes.
-            let r = unsafe { libc::send(self.fd.as_raw_fd(), f.as_ptr() as *const libc::c_void, f.len(), 0) };
+            let (ptr, len) = if f.len() < MIN_ETH_FRAME {
+                padded[..f.len()].copy_from_slice(f);
+                padded[f.len()..].fill(0);
+                (padded.as_ptr(), MIN_ETH_FRAME)
+            } else {
+                (f.as_ptr(), f.len())
+            };
+            // SAFETY: ptr points to a valid buffer of len bytes.
+            let r = unsafe { libc::send(self.fd.as_raw_fd(), ptr as *const libc::c_void, len, 0) };
             if r < 0 {
                 let e = io::Error::last_os_error();
                 // Full queue or a frame larger than the interface MTU: drop it, like a switch would.
                 if would_block(&e) || matches!(e.raw_os_error(), Some(libc::EMSGSIZE) | Some(libc::ENETDOWN)) {
+                    continue;
+                }
+                // The driver refused this frame (see MIN_ETH_FRAME); the adapter itself is fine.
+                if e.raw_os_error() == Some(libc::EINVAL) {
+                    if !self.warned_rejected.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        self.log.warn(format!(
+                            "The driver of '{}' rejected a {len}-byte frame (EINVAL); such frames are dropped.",
+                            self.ifname
+                        ));
+                    }
                     continue;
                 }
                 return Err(e);
