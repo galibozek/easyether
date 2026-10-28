@@ -4,6 +4,7 @@
 //! at layer 2, like plugging the remote machine into the same switch.
 
 mod gui;
+mod instance;
 mod l2;
 mod log;
 mod logo;
@@ -90,6 +91,15 @@ mod console {
 }
 
 fn run_gui() {
+    // One GUI at a time (the CLI modes are not restricted).
+    let _lock = match instance::acquire() {
+        Ok(Some(lock)) => Some(lock),
+        Ok(None) => return instance::already_running(),
+        Err(e) => {
+            eprintln!("EasyEther: cannot check for another instance: {e}");
+            None
+        }
+    };
     let mut viewport = eframe::egui::ViewportBuilder::default()
         .with_title("EasyEther")
         .with_inner_size([880.0, 620.0])
