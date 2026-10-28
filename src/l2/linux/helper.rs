@@ -69,15 +69,10 @@ fn spawn(log: &Logger) -> io::Result<Helper> {
         Ok(_) => Ok(h),
         Err(e) => {
             // pkexec exits right after the dialog; give it a moment so the code is available.
-            let mut status = None;
-            for _ in 0..20 {
-                status = h.child.try_wait().ok().flatten();
-                if status.is_some() {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-            let status = status.and_then(|s| s.code());
+            let status = super::wait_timeout(&mut h.child, std::time::Duration::from_secs(1))
+                .ok()
+                .flatten()
+                .and_then(|s| s.code());
             Err(match status {
                 Some(126) => io::Error::new(
                     io::ErrorKind::PermissionDenied,
@@ -232,8 +227,16 @@ pub fn ip_addr(action: &str, cidr: &str, log: &Logger) -> io::Result<()> {
     call(&format!("ip {action} {cidr}"), log).map(|_| ())
 }
 
-pub fn dhcp(action: &str, log: &Logger) -> io::Result<()> {
-    call(&format!("dhcp {action}"), log).map(|_| ())
+pub fn dhcp_start(log: &Logger) -> io::Result<()> {
+    call("dhcp start", log).map(|_| ())
+}
+
+/// Stops dhcpcd if the helper is still running; never starts a new helper for it.
+pub fn dhcp_stop(log: &Logger) {
+    let mut guard = HELPER.lock().unwrap();
+    if let Some(h) = guard.as_mut() {
+        let _ = h.request("dhcp stop", log);
+    }
 }
 
 pub fn restore_offload(ifname: &str, prev: Offload) -> io::Result<()> {

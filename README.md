@@ -71,7 +71,8 @@ start. The drivers it installs are signed by the SoftEther project.
 2. The virtual adapter ("VPN Client Adapter - VPN127" on Windows, `eeth0` on Linux) now sits on
    the remote network. Use DHCP, link-local, or set a static IPv4 under **Network settings**.
    On Linux, Automatic mode runs `dhcpcd` on `eeth0` (install it if missing): IPv4 only, no
-   default gateway and no DNS changes, falling back to 169.254.x.x when no DHCP server answers.
+   routes from the remote network except its own subnet, no DNS changes, falling back to
+   169.254.x.x when no DHCP server answers.
 3. Start the diagnostic software and select that adapter, as if the cable were plugged in locally.
 
 Closing the window exits; while a tunnel is active it asks for confirmation first. A tray icon
@@ -171,9 +172,14 @@ drivers/           SoftEther SeLow/Neo6 driver packages (x64, x86) + install/uni
 - **"Drivers missing" on Windows**: click *Install drivers* (administrator rights required);
   a restart may be needed once. `drivers\uninstall-drivers.bat` removes them.
 - **Linux, no polkit dialog / "pkexec not found"**: install polkit, or grant the binary
-  capabilities once: `sudo setcap cap_net_admin,cap_net_raw+ep <path to easyether>`.
+  capabilities once: `sudo setcap cap_net_admin,cap_net_raw+ep <path to easyether>`. Automatic
+  IPv4 (`dhcpcd` runs as root) still needs polkit; with capabilities alone use a static IPv4.
 - **No tray icon on Linux**: the tray needs a StatusNotifier host (KDE, or GNOME with the
   AppIndicator extension) and the user's session D-Bus; do not run with `sudo`.
+- **Client gets an address but cannot reach the remote device**: the remote network may use
+  the same subnet as your LAN. The LAN always wins (on Linux the `eeth0` route gets metric
+  9000), so you never cut yourself off; use a static IPv4 in another range on both ends, or
+  disconnect the overlapping LAN while working.
 - **Linux needs Wayland**: the Linux build has no X11 backend. On an X11 desktop run it under a
   Wayland session (or a nested compositor).
 

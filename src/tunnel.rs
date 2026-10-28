@@ -985,8 +985,13 @@ fn client_main(
         None => match l2::start_dhcp(log) {
             Ok(g) => g,
             Err(e) => {
+                let fix = if e.kind() == io::ErrorKind::NotFound {
+                    "Install dhcpcd or set"
+                } else {
+                    "Set"
+                };
                 log.warn(format!(
-                    "No automatic IPv4 on '{}': {e}. Install dhcpcd or set a static IPv4 in Network settings.",
+                    "No automatic IPv4 on '{}': {e}. {fix} a static IPv4 in Network settings.",
                     l2::client_adapter_name()
                 ));
                 None

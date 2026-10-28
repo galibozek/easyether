@@ -10,8 +10,8 @@ use std::ffi::CStr;
 use std::io;
 use std::net::Ipv4Addr;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::process::Command;
-use std::time::Duration;
+use std::process::{Child, Command, ExitStatus};
+use std::time::{Duration, Instant};
 
 use super::{AdapterInfo, L2Port, format_mac};
 use crate::log::Logger;
@@ -199,7 +199,7 @@ pub fn apply_static_ipv4(addr: Ipv4Addr, prefix: u8, log: &Logger) -> io::Result
 
 enum Dhcp {
     /// We run as root and started dhcpcd ourselves.
-    Direct(Option<std::process::Child>),
+    Direct(Option<Child>),
     /// dhcpcd runs under the privileged helper.
     Helper,
 }
@@ -219,32 +219,50 @@ impl Drop for DhcpGuard {
                     dhcp::stop(child);
                 }
             }
-            Dhcp::Helper => {
-                let _ = helper::dhcp("stop", &self.log);
-            }
+            // Only through a helper that is still alive: if it died, dhcpcd died with it
+            // (PR_SET_PDEATHSIG), and a stop must not pop up a new polkit dialog.
+            Dhcp::Helper => helper::dhcp_stop(&self.log),
         }
     }
 }
 
 /// "Automatic" IPv4 on the TAP adapter: runs dhcpcd until the guard is dropped and logs the
-/// address once it is there.
+/// address once it is there. `Ok(None)` when a system-wide dhcpcd already manages the adapter.
 pub fn start_dhcp(log: &Logger) -> io::Result<Option<Box<dyn Send>>> {
+    if dhcp::system_instance_running() {
+        log.warn(format!(
+            "A system-wide dhcpcd is running and configures '{}' with /etc/dhcpcd.conf; EasyEther's \
+             protections (no routes or DNS from the remote network) do not apply. Use a static IPv4 \
+             if that network is not trusted.",
+            tap::IFNAME
+        ));
+        return Ok(None);
+    }
+    // dhcpcd itself needs root; capabilities granted to EasyEther (setcap) do not carry over
+    // to it, so without root the polkit helper is the only way.
     // SAFETY: geteuid has no preconditions.
     let dhcp = if unsafe { libc::geteuid() } == 0 {
         Dhcp::Direct(Some(dhcp::spawn()?))
     } else {
-        helper::dhcp("start", log)?;
+        helper::dhcp_start(log).map_err(|e| match e.kind() {
+            io::ErrorKind::PermissionDenied => io::Error::new(
+                e.kind(),
+                format!("dhcpcd needs administrator rights ({})", short_permission_error(&e)),
+            ),
+            _ => e,
+        })?;
         Dhcp::Helper
     };
     log.info(format!(
-        "DHCP started on '{}' (IPv4 only, no default gateway; falls back to 169.254.x.x).",
+        "DHCP started on '{}' (IPv4 only, no routes or DNS from the remote network; falls back to 169.254.x.x).",
         tap::IFNAME
     ));
     let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (done2, log2) = (done.clone(), log.clone());
     std::thread::spawn(move || {
-        let deadline = std::time::Instant::now() + Duration::from_secs(60);
-        while !done2.load(std::sync::atomic::Ordering::Relaxed) && std::time::Instant::now() < deadline {
+        const WAIT: Duration = Duration::from_secs(60);
+        let deadline = Instant::now() + WAIT;
+        while !done2.load(std::sync::atomic::Ordering::Relaxed) {
             if let Some(ip) = ipv4_addresses().get(tap::IFNAME).and_then(|v| v.first()) {
                 let kind = if ip.is_link_local() {
                     " (link-local, no DHCP server answered)"
@@ -252,6 +270,15 @@ pub fn start_dhcp(log: &Logger) -> io::Result<Option<Box<dyn Send>>> {
                     ""
                 };
                 log2.info(format!("IPv4 {ip}{kind} on '{}'.", tap::IFNAME));
+                return;
+            }
+            if Instant::now() >= deadline {
+                log2.warn(format!(
+                    "No IPv4 on '{}' after {} s (dhcpcd got no answer and no link-local address). \
+                     Set a static IPv4 in Network settings.",
+                    tap::IFNAME,
+                    WAIT.as_secs()
+                ));
                 return;
             }
             std::thread::sleep(Duration::from_millis(500));
@@ -262,6 +289,31 @@ pub fn start_dhcp(log: &Logger) -> io::Result<Option<Box<dyn Send>>> {
         done,
         log: log.clone(),
     })))
+}
+
+/// The helper's PermissionDenied texts are written for opening adapters; keep only the part
+/// that matters for dhcpcd.
+fn short_permission_error(e: &io::Error) -> String {
+    let msg = e.to_string();
+    if msg.contains("not installed") {
+        "pkexec (polkit) is not installed".into()
+    } else {
+        msg
+    }
+}
+
+/// Waits up to `timeout` for `child` to exit; `Ok(None)` when it is still running.
+pub(crate) fn wait_timeout(child: &mut Child, timeout: Duration) -> io::Result<Option<ExitStatus>> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 
 /// A system tool by absolute path (we run with root/capabilities; never trust PATH).
