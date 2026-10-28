@@ -28,8 +28,9 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 libc = "0.2"
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
-# Tray on Windows/macOS, maintained by the Tauri team (no tray on Linux, see gui/tray.rs)
-tray-icon = "0.26"
+# Tray on Windows/macOS, maintained by the Tauri team (no tray on Linux, see gui/tray.rs).
+# Default features only add the Linux GTK backend, which would still sit in Cargo.lock.
+tray-icon = { version = "0.26", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 # Official Microsoft bindings
