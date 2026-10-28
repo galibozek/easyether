@@ -206,13 +206,12 @@ enum Dhcp {
 
 struct DhcpGuard {
     dhcp: Dhcp,
-    done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    _watch: super::AddressWatch,
     log: Logger,
 }
 
 impl Drop for DhcpGuard {
     fn drop(&mut self) {
-        self.done.store(true, std::sync::atomic::Ordering::Relaxed);
         match &mut self.dhcp {
             Dhcp::Direct(child) => {
                 if let Some(child) = child.take() {
@@ -257,36 +256,10 @@ pub fn start_dhcp(log: &Logger) -> io::Result<Option<Box<dyn Send>>> {
         "DHCP started on '{}' (IPv4 only, no routes or DNS from the remote network; falls back to 169.254.x.x).",
         tap::IFNAME
     ));
-    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let (done2, log2) = (done.clone(), log.clone());
-    std::thread::spawn(move || {
-        const WAIT: Duration = Duration::from_secs(60);
-        let deadline = Instant::now() + WAIT;
-        while !done2.load(std::sync::atomic::Ordering::Relaxed) {
-            if let Some(ip) = ipv4_addresses().get(tap::IFNAME).and_then(|v| v.first()) {
-                let kind = if ip.is_link_local() {
-                    " (link-local, no DHCP server answered)"
-                } else {
-                    ""
-                };
-                log2.info(format!("IPv4 {ip}{kind} on '{}'.", tap::IFNAME));
-                return;
-            }
-            if Instant::now() >= deadline {
-                log2.warn(format!(
-                    "No IPv4 on '{}' after {} s (dhcpcd got no answer and no link-local address). \
-                     Set a static IPv4 in Network settings.",
-                    tap::IFNAME,
-                    WAIT.as_secs()
-                ));
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(500));
-        }
-    });
+    let watch = super::watch_ipv4(|| ipv4_addresses().remove(tap::IFNAME).unwrap_or_default(), log);
     Ok(Some(Box::new(DhcpGuard {
         dhcp,
-        done,
+        _watch: watch,
         log: log.clone(),
     })))
 }

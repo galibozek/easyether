@@ -196,17 +196,72 @@ pub fn apply_static_ipv4(addr: std::net::Ipv4Addr, prefix: u8, log: &Logger) -> 
     platform::apply_static_ipv4(addr, prefix, log)
 }
 
-/// "Automatic" IPv4 on the client's virtual adapter where the OS does not do it by itself
-/// (Linux: dhcpcd). Dropping the guard stops it. `None` when nothing needs to run.
+/// "Automatic" IPv4 on the client's virtual adapter (Linux: dhcpcd; Windows runs DHCP on the
+/// adapter itself) and logs the address once it is there. Dropping the guard stops both.
 pub fn start_dhcp(log: &Logger) -> io::Result<Option<Box<dyn Send>>> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(windows, target_os = "linux"))]
     return platform::start_dhcp(log);
-    // Windows runs DHCP on the virtual adapter itself.
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = log;
         Ok(None)
     }
+}
+
+/// Stops the thread started by `watch_ipv4` when dropped.
+#[cfg(any(windows, target_os = "linux"))]
+pub(crate) struct AddressWatch(Arc<std::sync::atomic::AtomicBool>);
+
+#[cfg(any(windows, target_os = "linux"))]
+impl Drop for AddressWatch {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Logs the client adapter's IPv4 address (`lookup` lists its current ones) once the OS has
+/// one. A link-local fallback is logged too, and watching goes on in case a DHCP lease
+/// replaces it later; a lease wins over a link-local address that is still present.
+#[cfg(any(windows, target_os = "linux"))]
+pub(crate) fn watch_ipv4(lookup: impl Fn() -> Vec<std::net::Ipv4Addr> + Send + 'static, log: &Logger) -> AddressWatch {
+    // Windows waits about a minute for DHCP before it falls back to 169.254.x.x; dhcpcd on
+    // Linux is much quicker (IPv4LL after ~10 s).
+    #[cfg(windows)]
+    const WAIT: Duration = Duration::from_secs(65);
+    #[cfg(not(windows))]
+    const WAIT: Duration = Duration::from_secs(60);
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (done2, log) = (done.clone(), log.clone());
+    std::thread::spawn(move || {
+        let name = client_adapter_name();
+        let deadline = Instant::now() + WAIT;
+        let mut last = None;
+        while !done2.load(std::sync::atomic::Ordering::Relaxed) {
+            let addrs = lookup();
+            let best = addrs.iter().find(|ip| !ip.is_link_local()).or(addrs.first()).copied();
+            if let Some(ip) = best.filter(|ip| Some(*ip) != last) {
+                if ip.is_link_local() {
+                    log.info(format!("IPv4 {ip} (link-local, no DHCP server answered) on '{name}'."));
+                    last = Some(ip);
+                } else {
+                    log.info(format!("IPv4 {ip} on '{name}'."));
+                    return;
+                }
+            }
+            if Instant::now() >= deadline {
+                if last.is_none() {
+                    log.warn(format!(
+                        "No IPv4 on '{name}' after {} s (no DHCP answer and no link-local address). \
+                         Set a static IPv4 in Network settings.",
+                        WAIT.as_secs()
+                    ));
+                }
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    });
+    AddressWatch(done)
 }
 
 /// Linux: the root helper started by pkexec (see linux/helper.rs).

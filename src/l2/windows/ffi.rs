@@ -11,8 +11,8 @@ pub use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
 };
 pub use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT};
 pub use windows_sys::Win32::NetworkManagement::IpHelper::{
-    ConvertInterfaceGuidToLuid, CreateUnicastIpAddressEntry, DeleteUnicastIpAddressEntry,
-    InitializeUnicastIpAddressEntry, MIB_UNICASTIPADDRESS_ROW,
+    ConvertInterfaceGuidToLuid, CreateUnicastIpAddressEntry, DeleteUnicastIpAddressEntry, FreeMibTable,
+    GetUnicastIpAddressTable, InitializeUnicastIpAddressEntry, MIB_UNICASTIPADDRESS_ROW, MIB_UNICASTIPADDRESS_TABLE,
 };
 pub use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE, ReadFile, WriteFile};
 pub use windows_sys::Win32::System::IO::DeviceIoControl;

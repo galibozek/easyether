@@ -40,6 +40,10 @@ pub fn open_client(_mac: [u8; 6], log: &Logger) -> io::Result<Box<dyn L2Port>> {
     Ok(Box::new(neo::open(log)?))
 }
 
+pub fn start_dhcp(log: &Logger) -> io::Result<Option<Box<dyn Send>>> {
+    ipconfig::start_dhcp(log)
+}
+
 pub fn apply_static_ipv4(addr: Ipv4Addr, prefix: u8, log: &Logger) -> io::Result<Box<dyn Send>> {
     ipconfig::apply(addr, prefix, log)
 }
