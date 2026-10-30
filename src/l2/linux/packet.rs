@@ -385,35 +385,71 @@ impl L2Port for PacketPort {
     }
 
     fn send(&self, frames: &[Vec<u8>]) -> io::Result<()> {
-        let mut padded = [0u8; MIN_ETH_FRAME];
-        for f in frames {
+        for chunk in frames.chunks(MAX_BATCH) {
+            self.send_batch(chunk)?;
+        }
+        Ok(())
+    }
+}
+
+impl PacketPort {
+    /// Sends up to `MAX_BATCH` frames with as few `sendmmsg` calls as possible. A frame the
+    /// kernel refuses is skipped and the rest still goes out.
+    fn send_batch(&self, frames: &[Vec<u8>]) -> io::Result<()> {
+        // Short frames are padded to MIN_ETH_FRAME; each needs its own copy because all slots
+        // are handed to the kernel at once.
+        let mut pads = [[0u8; MIN_ETH_FRAME]; MAX_BATCH];
+        // SAFETY: plain C structs; all-zero is a valid value (no name, no control data).
+        let mut iovs: [libc::iovec; MAX_BATCH] = unsafe { zeroed() };
+        let mut msgs: [libc::mmsghdr; MAX_BATCH] = unsafe { zeroed() };
+        for (i, f) in frames.iter().enumerate() {
             let (ptr, len) = if f.len() < MIN_ETH_FRAME {
-                padded[..f.len()].copy_from_slice(f);
-                padded[f.len()..].fill(0);
-                (padded.as_ptr(), MIN_ETH_FRAME)
+                pads[i][..f.len()].copy_from_slice(f);
+                (pads[i].as_ptr(), MIN_ETH_FRAME)
             } else {
                 (f.as_ptr(), f.len())
             };
-            // SAFETY: ptr points to a valid buffer of len bytes.
-            let r = unsafe { libc::send(self.fd.as_raw_fd(), ptr as *const libc::c_void, len, 0) };
-            if r < 0 {
-                let e = io::Error::last_os_error();
-                // Full queue or a frame larger than the interface MTU: drop it, like a switch would.
-                if would_block(&e) || matches!(e.raw_os_error(), Some(libc::EMSGSIZE) | Some(libc::ENETDOWN)) {
-                    continue;
-                }
-                // The driver refused this frame (see MIN_ETH_FRAME); the adapter itself is fine.
-                if e.raw_os_error() == Some(libc::EINVAL) {
-                    if !self.warned_rejected.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                        self.log.warn(format!(
-                            "The driver of '{}' rejected a {len}-byte frame (EINVAL); such frames are dropped.",
-                            self.ifname
-                        ));
-                    }
-                    continue;
-                }
-                return Err(e);
+            iovs[i] = libc::iovec {
+                iov_base: ptr as *mut libc::c_void,
+                iov_len: len,
+            };
+            msgs[i].msg_hdr.msg_iov = &mut iovs[i];
+            msgs[i].msg_hdr.msg_iovlen = 1;
+        }
+        let n = frames.len();
+        let mut i = 0;
+        while i < n {
+            // SAFETY: msgs[i..n] are initialised and point into `frames`/`pads`, which outlive
+            // the call.
+            let sent =
+                unsafe { libc::sendmmsg(self.fd.as_raw_fd(), msgs[i..].as_mut_ptr(), (n - i) as libc::c_uint, 0) };
+            if sent >= 0 {
+                i += (sent as usize).max(1);
+                continue;
             }
+            // sendmmsg reports an error only when the first message fails; after a partial
+            // success the next round starts at the failed message and lands here with its errno.
+            let e = io::Error::last_os_error();
+            if e.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            // Full queue or a frame larger than the interface MTU: drop it, like a switch would.
+            if would_block(&e) || matches!(e.raw_os_error(), Some(libc::EMSGSIZE) | Some(libc::ENETDOWN)) {
+                i += 1;
+                continue;
+            }
+            // The driver refused this frame (see MIN_ETH_FRAME); the adapter itself is fine.
+            if e.raw_os_error() == Some(libc::EINVAL) {
+                if !self.warned_rejected.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    self.log.warn(format!(
+                        "The driver of '{}' rejected a {}-byte frame (EINVAL); such frames are dropped.",
+                        self.ifname, iovs[i].iov_len
+                    ));
+                }
+                i += 1;
+                continue;
+            }
+            return Err(e);
         }
         Ok(())
     }
