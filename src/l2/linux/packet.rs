@@ -18,6 +18,9 @@ const PACKET_IGNORE_OUTGOING: libc::c_int = 23;
 /// drivers raise that above 14 by their TX header (rndis_host 58, lan78xx/smsc95xx 22,
 /// asix 18). A 42-byte ARP request from the peer would never get out otherwise.
 const MIN_ETH_FRAME: usize = 60;
+/// Receive queue of the raw socket. The default (net.core.rmem_default, about 200 KiB or
+/// 130 frames) overflows while the sender thread is busy writing a batch to the peer.
+const RECV_QUEUE_BYTES: libc::c_int = 4 << 20;
 const TP_STATUS_VLAN_VALID: u32 = 1 << 4;
 const TP_STATUS_VLAN_TPID_VALID: u32 = 1 << 6;
 
@@ -188,6 +191,11 @@ pub fn open_raw(ifname: &str) -> io::Result<Opened> {
     setsockopt(&fd, libc::SOL_PACKET, libc::PACKET_AUXDATA, &1 as &libc::c_int)?;
     if setsockopt(&fd, libc::SOL_PACKET, PACKET_IGNORE_OUTGOING, &1 as &libc::c_int).is_err() {
         warnings.push("Kernel lacks PACKET_IGNORE_OUTGOING; filtering outgoing frames in user space.".into());
+    }
+    // Running as root, FORCE lifts the net.core.rmem_max cap; the plain option is the fallback
+    // (capped by the kernel). Best effort: on overflow frames are dropped, as a switch would.
+    if setsockopt(&fd, libc::SOL_SOCKET, libc::SO_RCVBUFFORCE, &RECV_QUEUE_BYTES).is_err() {
+        let _ = setsockopt(&fd, libc::SOL_SOCKET, libc::SO_RCVBUF, &RECV_QUEUE_BYTES);
     }
 
     // GRO/LRO merge received packets into frames far larger than the MTU, which cannot be
