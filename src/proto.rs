@@ -170,6 +170,10 @@ pub fn decode_payload(payload: &[u8], frames: &mut Vec<Vec<u8>>) -> io::Result<(
 #[derive(Default)]
 pub struct BatchDecoder {
     buf: Vec<u8>,
+    /// Start of the first unconsumed message in `buf`. Consumed messages are removed only when
+    /// no complete message is left, so many small messages in one read cost one move, not one
+    /// move of the remainder per message.
+    pos: usize,
 }
 
 impl BatchDecoder {
@@ -179,25 +183,35 @@ impl BatchDecoder {
 
     /// Decodes one complete message if available; frames of a batch are appended to `frames`.
     pub fn next(&mut self, frames: &mut Vec<Vec<u8>>) -> io::Result<Option<Msg>> {
-        if self.buf.len() < 4 {
-            return Ok(None);
+        let pending = &self.buf[self.pos..];
+        if pending.len() < 4 {
+            return Ok(self.compact());
         }
-        let len = u32::from_be_bytes(self.buf[..4].try_into().unwrap()) as usize;
+        let len = u32::from_be_bytes(pending[..4].try_into().unwrap()) as usize;
         if len > MAX_PAYLOAD {
             return Err(invalid("batch too large"));
         }
-        if self.buf.len() < 4 + len {
-            return Ok(None);
+        if pending.len() < 4 + len {
+            return Ok(self.compact());
         }
-        let payload = &self.buf[4..4 + len];
+        let payload = &pending[4..4 + len];
         let msg = if payload == CLOSE_COUNT.to_be_bytes() {
             Msg::Close
         } else {
             decode_payload(payload, frames)?;
             Msg::Batch
         };
-        self.buf.drain(..4 + len);
+        self.pos += 4 + len;
         Ok(Some(msg))
+    }
+
+    /// Drops the consumed prefix (at most one partial message stays).
+    fn compact(&mut self) -> Option<Msg> {
+        if self.pos > 0 {
+            self.buf.drain(..self.pos);
+            self.pos = 0;
+        }
+        None
     }
 }
 
@@ -226,6 +240,35 @@ mod tests {
         }
         assert_eq!(batches, 1);
         assert_eq!(got, frames);
+    }
+
+    #[test]
+    fn many_messages_in_one_push() {
+        // Three batches plus the first half of a fourth arrive in one read.
+        let mut stream = Vec::new();
+        let mut one = Vec::new();
+        for i in 0..3u8 {
+            encode_batch(&[frame(20 + i as usize, i)], &mut one);
+            stream.extend_from_slice(&one);
+        }
+        encode_batch(&[frame(100, 9)], &mut one);
+        let half = one.len() / 2;
+        stream.extend_from_slice(&one[..half]);
+        let mut dec = BatchDecoder::default();
+        dec.push(&stream);
+        let mut got = Vec::new();
+        for _ in 0..3 {
+            assert_eq!(dec.next(&mut got).unwrap(), Some(Msg::Batch));
+        }
+        assert_eq!(got, vec![frame(20, 0), frame(21, 1), frame(22, 2)]);
+        assert_eq!(dec.next(&mut got).unwrap(), None);
+        // Only the partial message is kept; the rest completes it.
+        assert_eq!(dec.buf.len(), half);
+        dec.push(&one[half..]);
+        assert_eq!(dec.next(&mut got).unwrap(), Some(Msg::Batch));
+        assert_eq!(got.last().unwrap(), &frame(100, 9));
+        assert_eq!(dec.next(&mut got).unwrap(), None);
+        assert!(dec.buf.is_empty());
     }
 
     #[test]
