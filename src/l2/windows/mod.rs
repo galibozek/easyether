@@ -71,10 +71,16 @@ impl DevicePort {
 impl L2Port for DevicePort {
     fn recv(&self, out: &mut Vec<Vec<u8>>, timeout: Duration) -> io::Result<()> {
         let ms = timeout.as_millis().min(u32::MAX as u128 - 1) as u32;
+        // The queue is read after a timeout too. Both drivers reset the event after a read
+        // that emptied the queue *outside* the lock that guards it, and set it outside that
+        // lock as well, so a frame queued in that gap is left with the event reset. Waiting for
+        // the event alone would then hold that frame until the next one arrives, which in a
+        // request/response exchange is a TCP retransmission hundreds of milliseconds later.
+        // SoftEther reads after every wait for the same reason. An empty read costs a few tens
+        // of microseconds per poll interval.
         // SAFETY: event is a valid handle owned by self.
         match unsafe { ffi::WaitForSingleObject(self.event.0, ms) } {
-            ffi::WAIT_OBJECT_0 => {}
-            ffi::WAIT_TIMEOUT => return Ok(()),
+            ffi::WAIT_OBJECT_0 | ffi::WAIT_TIMEOUT => {}
             _ => return Err(io::Error::last_os_error()),
         }
         let mut b = self.rbuf.lock().unwrap();

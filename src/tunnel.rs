@@ -13,6 +13,9 @@ use crate::log::Logger;
 use crate::proto::{self, BatchDecoder, MAX_BATCH};
 use crate::secure::{self, SecureStream, ServerHandshake, ServerIdentity};
 
+/// How long the device thread waits for frames before it looks at the stop flag and the
+/// keepalive timer. On Windows it also bounds the delay of a frame whose "packets available"
+/// event got lost in the drivers' set/reset race (see `DevicePort::recv`).
 const POLL: Duration = Duration::from_millis(50);
 
 /// No data (not even a keepalive) for this long ends the session. Short stalls (Wi-Fi roaming,
