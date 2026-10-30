@@ -4,6 +4,7 @@ use std::ffi::CString;
 use std::io;
 use std::mem::{size_of, zeroed};
 use std::os::fd::{AsRawFd, OwnedFd};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use super::{owned, permission_hint, poll_readable, would_block};
@@ -39,6 +40,8 @@ pub struct PacketPort {
     restore: Option<Offload>,
     warned_oversized: std::sync::atomic::AtomicBool,
     warned_rejected: std::sync::atomic::AtomicBool,
+    /// Buffers for `recvmmsg`, reused across calls (about 400 KiB).
+    rx: Mutex<RecvBatch>,
 }
 
 impl Drop for PacketPort {
@@ -214,75 +217,139 @@ impl PacketPort {
             restore,
             warned_oversized: std::sync::atomic::AtomicBool::new(false),
             warned_rejected: std::sync::atomic::AtomicBool::new(false),
+            rx: Mutex::new(RecvBatch::new()),
         };
         port.drain();
         log.info(format!("Raw socket opened on '{ifname}' (promiscuous mode)."));
         port
     }
 
-    /// Receives one frame without blocking. `Ok(None)` when the queue is empty.
-    fn recv_one(&self, buf: &mut [u8]) -> io::Result<Option<Vec<u8>>> {
-        let mut iov = libc::iovec {
-            iov_base: buf.as_mut_ptr() as *mut libc::c_void,
-            iov_len: buf.len(),
+    /// Receives up to `max` frames with one `recvmmsg` call and appends them to `out`.
+    /// Returns how many datagrams the kernel delivered, skipped ones included; 0 when the
+    /// queue is empty.
+    fn recv_batch(&self, out: &mut Vec<Vec<u8>>, max: usize) -> io::Result<usize> {
+        let mut guard = self.rx.lock().unwrap();
+        let b = &mut *guard;
+        let count = max.min(MAX_BATCH);
+        b.prepare(count);
+        // SAFETY: the first `count` headers point into buffers owned by `b`, which outlives
+        // the call; the kernel writes at most MAX_FRAME bytes per slot.
+        let n = unsafe {
+            libc::recvmmsg(
+                self.fd.as_raw_fd(),
+                b.msgs.as_mut_ptr(),
+                count as libc::c_uint,
+                libc::MSG_DONTWAIT | libc::MSG_TRUNC,
+                std::ptr::null_mut(),
+            )
         };
-        let mut cmsg = [0u64; 16];
-        // SAFETY: zeroed sockaddr_ll / msghdr are valid; all pointers stay alive for the call.
-        let mut from: libc::sockaddr_ll = unsafe { zeroed() };
-        let mut msg: libc::msghdr = unsafe { zeroed() };
-        msg.msg_name = &mut from as *mut libc::sockaddr_ll as *mut libc::c_void;
-        msg.msg_namelen = size_of::<libc::sockaddr_ll>() as libc::socklen_t;
-        msg.msg_iov = &mut iov;
-        msg.msg_iovlen = 1;
-        msg.msg_control = cmsg.as_mut_ptr() as *mut libc::c_void;
-        msg.msg_controllen = size_of::<[u64; 16]>() as _;
-        let n = unsafe { libc::recvmsg(self.fd.as_raw_fd(), &mut msg, libc::MSG_DONTWAIT | libc::MSG_TRUNC) };
         if n < 0 {
             let e = io::Error::last_os_error();
             // ENETDOWN is reported once when the link goes down; the link monitor logs that.
             let transient =
                 would_block(&e) || e.kind() == io::ErrorKind::Interrupted || e.raw_os_error() == Some(libc::ENETDOWN);
-            return if transient { Ok(None) } else { Err(e) };
+            return if transient { Ok(0) } else { Err(e) };
         }
         let n = n as usize;
-        // Skip frames sent by this host (incl. our own injected ones) and oversized frames.
-        if from.sll_pkttype == libc::PACKET_OUTGOING || n < MIN_FRAME {
-            return Ok(Some(Vec::new()));
-        }
-        if n > buf.len() {
-            if !self.warned_oversized.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                self.log.warn(format!(
-                    "Dropping frames larger than {MAX_FRAME} bytes on '{}' ({n} bytes seen): jumbo frames or receive offload (GRO/LRO) are not supported.",
-                    self.ifname
-                ));
+        for i in 0..n {
+            // With MSG_TRUNC this is the real frame length, even when it did not fit.
+            let len = b.msgs[i].msg_len as usize;
+            // Skip frames sent by this host (incl. our own injected ones) and oversized frames.
+            if b.names[i].sll_pkttype == libc::PACKET_OUTGOING || len < MIN_FRAME {
+                continue;
             }
-            return Ok(Some(Vec::new()));
-        }
-        // A VLAN tag the NIC stripped into out-of-band data, if any: (tpid, tci).
-        let mut vlan: Option<(u16, u16)> = None;
-        // SAFETY: walking the control messages the kernel filled into `cmsg`.
-        unsafe {
-            let mut c = libc::CMSG_FIRSTHDR(&msg);
-            while !c.is_null() {
-                if (*c).cmsg_level == libc::SOL_PACKET && (*c).cmsg_type == libc::PACKET_AUXDATA {
-                    let aux = std::ptr::read_unaligned(libc::CMSG_DATA(c) as *const TpacketAuxdata);
-                    if aux.tp_vlan_tci != 0 || aux.tp_status & TP_STATUS_VLAN_VALID != 0 {
-                        let tpid = if aux.tp_status & TP_STATUS_VLAN_TPID_VALID != 0 {
-                            aux.tp_vlan_tpid
-                        } else {
-                            0x8100
-                        };
-                        vlan = Some((tpid, aux.tp_vlan_tci));
-                    }
+            if len > MAX_FRAME {
+                if !self.warned_oversized.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    self.log.warn(format!(
+                        "Dropping frames larger than {MAX_FRAME} bytes on '{}' ({len} bytes seen): jumbo frames or receive offload (GRO/LRO) are not supported.",
+                        self.ifname
+                    ));
                 }
-                c = libc::CMSG_NXTHDR(&msg, c);
+                continue;
+            }
+            let frame = &b.data[i * MAX_FRAME..i * MAX_FRAME + len];
+            match stripped_vlan_tag(&b.msgs[i].msg_hdr) {
+                // Re-inserting the 4-byte tag must not exceed the frame limit.
+                Some(_) if len + 4 > MAX_FRAME => {}
+                Some((tpid, tci)) => out.push(insert_vlan_tag(frame, tpid, tci)),
+                None => out.push(frame.to_vec()),
             }
         }
-        match vlan {
-            // Re-inserting the 4-byte tag must not exceed the frame limit.
-            Some(_) if n + 4 > MAX_FRAME => Ok(Some(Vec::new())),
-            Some((tpid, tci)) => Ok(Some(insert_vlan_tag(&buf[..n], tpid, tci))),
-            None => Ok(Some(buf[..n].to_vec())),
+        Ok(n)
+    }
+}
+
+/// A VLAN tag the NIC stripped into out-of-band data, if any: (tpid, tci).
+fn stripped_vlan_tag(msg: &libc::msghdr) -> Option<(u16, u16)> {
+    let mut vlan = None;
+    // SAFETY: walking the control messages the kernel filled into the slot's control buffer.
+    unsafe {
+        let mut c = libc::CMSG_FIRSTHDR(msg);
+        while !c.is_null() {
+            if (*c).cmsg_level == libc::SOL_PACKET && (*c).cmsg_type == libc::PACKET_AUXDATA {
+                let aux = std::ptr::read_unaligned(libc::CMSG_DATA(c) as *const TpacketAuxdata);
+                if aux.tp_vlan_tci != 0 || aux.tp_status & TP_STATUS_VLAN_VALID != 0 {
+                    let tpid = if aux.tp_status & TP_STATUS_VLAN_TPID_VALID != 0 {
+                        aux.tp_vlan_tpid
+                    } else {
+                        0x8100
+                    };
+                    vlan = Some((tpid, aux.tp_vlan_tci));
+                }
+            }
+            c = libc::CMSG_NXTHDR(msg, c);
+        }
+    }
+    vlan
+}
+
+/// Per-slot control-message space: CMSG_SPACE(sizeof tpacket_auxdata) is 40 bytes.
+type Control = [u64; 8];
+
+/// Reusable buffers for `recvmmsg`: one slot per frame of a batch.
+struct RecvBatch {
+    data: Vec<u8>,
+    names: Vec<libc::sockaddr_ll>,
+    controls: Vec<Control>,
+    iovs: Vec<libc::iovec>,
+    msgs: Vec<libc::mmsghdr>,
+}
+
+// SAFETY: the raw pointers inside `iovs`/`msgs` only ever point into this struct's own
+// vectors and are rewritten by `prepare` before every use, so the struct can move between
+// threads like the plain buffers it owns.
+unsafe impl Send for RecvBatch {}
+
+impl RecvBatch {
+    fn new() -> RecvBatch {
+        // SAFETY: plain C structs; all-zero is a valid value for each of them.
+        RecvBatch {
+            data: vec![0u8; MAX_BATCH * MAX_FRAME],
+            names: vec![unsafe { zeroed() }; MAX_BATCH],
+            controls: vec![[0u64; 8]; MAX_BATCH],
+            iovs: vec![unsafe { zeroed() }; MAX_BATCH],
+            msgs: vec![unsafe { zeroed() }; MAX_BATCH],
+        }
+    }
+
+    /// Points the first `count` headers at their buffers. Done before every call because
+    /// the kernel overwrites the name/control lengths and the vectors must not be assumed
+    /// to stay at one address.
+    fn prepare(&mut self, count: usize) {
+        for i in 0..count {
+            self.iovs[i] = libc::iovec {
+                iov_base: self.data[i * MAX_FRAME..].as_mut_ptr() as *mut libc::c_void,
+                iov_len: MAX_FRAME,
+            };
+            // SAFETY: msghdr is plain old data; every pointer is set below.
+            let mut h: libc::msghdr = unsafe { zeroed() };
+            h.msg_name = &mut self.names[i] as *mut libc::sockaddr_ll as *mut libc::c_void;
+            h.msg_namelen = size_of::<libc::sockaddr_ll>() as libc::socklen_t;
+            h.msg_iov = &mut self.iovs[i];
+            h.msg_iovlen = 1;
+            h.msg_control = self.controls[i].as_mut_ptr() as *mut libc::c_void;
+            h.msg_controllen = size_of::<Control>() as _;
+            self.msgs[i] = libc::mmsghdr { msg_hdr: h, msg_len: 0 };
         }
     }
 }
@@ -297,17 +364,13 @@ impl L2Port for PacketPort {
         if !poll_readable(&self.fd, timeout)? {
             return Ok(());
         }
-        let mut buf = [0u8; MAX_FRAME];
         let start = out.len();
-        // Count attempts too, so a stream of skipped frames cannot spin forever.
-        for _ in 0..MAX_BATCH * 2 {
-            if out.len() - start >= MAX_BATCH {
+        // One recvmmsg normally empties the queue. A second one only when the first came back
+        // full (more may be waiting) or it skipped frames and the batch still has room.
+        for _ in 0..2 {
+            let room = MAX_BATCH - (out.len() - start);
+            if room == 0 || self.recv_batch(out, room)? < room {
                 break;
-            }
-            match self.recv_one(&mut buf)? {
-                None => break,
-                Some(f) if f.is_empty() => continue,
-                Some(f) => out.push(f),
             }
         }
         Ok(())
