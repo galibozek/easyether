@@ -286,11 +286,10 @@ fn run_session(
 
     // Peer -> device on this thread.
     let mut dec = BatchDecoder::default();
-    let mut data = Vec::new();
     let mut frames = Vec::new();
     let rx_end = 'outer: loop {
-        data.clear();
-        match stream.recv(&mut data) {
+        // Plaintext goes straight into the decoder's buffer (it only ever appends).
+        match stream.recv(dec.buffer_mut()) {
             Ok(0) => break End::Peer("the connection was closed unexpectedly".into()),
             Ok(n) => {
                 counters.rx_bytes.fetch_add(n as u64, Ordering::Relaxed);
@@ -303,7 +302,6 @@ fn run_session(
             }
             Err(e) => break End::Peer(e.to_string()),
         }
-        dec.push(&data);
         loop {
             frames.clear();
             match dec.next(&mut frames) {

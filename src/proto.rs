@@ -177,8 +177,16 @@ pub struct BatchDecoder {
 }
 
 impl BatchDecoder {
+    /// Appends bytes by copying; the session reads straight into `buffer_mut` instead.
+    #[cfg(test)]
     pub fn push(&mut self, data: &[u8]) {
         self.buf.extend_from_slice(data);
+    }
+
+    /// Lets a reader append incoming bytes directly, saving a copy. Whatever is appended
+    /// stays after the pending data; the caller must not touch what is already there.
+    pub fn buffer_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.buf
     }
 
     /// Decodes one complete message if available; frames of a batch are appended to `frames`.
