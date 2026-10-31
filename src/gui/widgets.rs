@@ -89,9 +89,8 @@ pub fn style(ctx: &egui::Context) {
     });
 }
 
-/// What a tab shows about its side of the tunnel.
-/// A running side's tab badge: download, upload and latency in the state's color,
-/// each "---" until known (waiting for a client, connecting).
+/// A running side's tab badge: download, upload and latency in the state's color, each
+/// "---" until known (waiting for a client, connecting).
 pub struct Badge {
     pub activity: Activity,
     pub traffic: Option<(u64, u64)>,
@@ -142,24 +141,23 @@ fn paint_arrow(painter: &egui::Painter, right: f32, y: f32, color: Color32, up: 
 }
 
 /// Tab badge, right-aligned at (`right`, `y`): `↓ rx ↑ tx · rtt` in the state's color, with
-/// "---" for what is not known yet. `id` keeps the slot widths; forget them with [`reset_badge`].
+/// "--- B/s" / "--- ms" for what is not known yet. `id` keeps the slot widths; forget them with [`reset_badge`].
 pub fn paint_badge(painter: &egui::Painter, id: egui::Id, right: f32, y: f32, color: Color32, badge: &Badge) {
     use crate::log::{format_rate, format_rtt};
     let font = egui::FontId::proportional(12.5);
-    let rate = |v: Option<u64>| v.map_or_else(|| "---".to_string(), format_rate);
+    // Not known yet: the smallest unit, so the badge reads the same as with numbers.
+    let rate = |v: Option<u64>| v.map_or_else(|| "--- B/s".to_string(), format_rate);
     let texts = [
-        badge.rtt.map_or_else(|| "---".to_string(), format_rtt),
+        badge.rtt.map_or_else(|| "--- ms".to_string(), format_rtt),
         rate(badge.traffic.map(|t| t.1)),
         rate(badge.traffic.map(|t| t.0)),
     ];
     let galleys = texts.map(|s| painter.layout_no_wrap(s, font.clone(), color));
-    // Each value is right-aligned in a slot that starts as wide as the smallest unit ("0 B/s",
-    // "0.0 ms") and only grows, to the widest value shown so far: compact while waiting, and the
-    // arrows and dots do not jump back and forth with the numbers ("0 B/s" vs "123.4 KB/s").
-    let width = |s: String| painter.layout_no_wrap(s, font.clone(), color).size().x;
-    let (rate_min, rtt_min) = (width(format_rate(0)), width(format_rtt(std::time::Duration::ZERO)));
+    // Each value is right-aligned in a slot that only grows, to the widest value shown so far:
+    // compact while waiting, and the arrows and dots do not jump back and forth with the
+    // numbers ("0 B/s" vs "123.4 KB/s").
     let slots = painter.ctx().data_mut(|d| {
-        let slots = d.get_temp_mut_or(id, [rtt_min, rate_min, rate_min]);
+        let slots = d.get_temp_mut_or(id, [0.0_f32; 3]);
         for (slot, g) in slots.iter_mut().zip(&galleys) {
             *slot = slot.max(g.size().x);
         }
