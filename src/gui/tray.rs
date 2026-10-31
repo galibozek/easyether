@@ -41,6 +41,10 @@ impl Tray {
     pub fn notify(&self, _text: &str) -> Result<(), String> {
         match *self {}
     }
+
+    pub fn set_tooltip(&self, _text: &str) {
+        match *self {}
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -116,6 +120,11 @@ impl Tray {
         }
         #[cfg(not(windows))]
         self.ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+    }
+
+    /// The text shown when hovering the tray icon (what runs, connected to whom).
+    pub fn set_tooltip(&self, text: &str) {
+        let _ = self.backend.0.set_tooltip(Some(text));
     }
 
     /// A short notification at the tray icon that disappears by itself (Windows balloon).

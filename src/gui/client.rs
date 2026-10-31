@@ -49,6 +49,38 @@ impl ClientTab {
         }
     }
 
+    /// What the tray icon's hover text says while connecting or connected: mode and server,
+    /// then how long it is connected and the traffic, or that it is (re)connecting. `None`
+    /// while off.
+    pub fn tray_status(&self, settings: &Settings) -> Option<String> {
+        if !self.is_running() {
+            return None;
+        }
+        let mode = if settings.client_secure { "Secure" } else { "Insecure" };
+        let link = self.worker.handle.as_ref().map(|h| h.client_link()).unwrap_or_default();
+        let server = link.peer.map_or_else(|| self.server_text(), |p| p.to_string());
+        let head = format!("Client ({mode}) → {server}");
+        Some(match link.since {
+            Some(since) => format!(
+                "{head}\nconnected · {}\n{}",
+                crate::log::format_uptime(since.elapsed()),
+                widgets::traffic_line(self.worker.traffic, self.worker.rtt)
+            ),
+            None if retry(&self.worker.status).is_some() => format!("{head}\nconnection lost · reconnecting"),
+            None => format!("{head}\nconnecting…"),
+        })
+    }
+
+    /// The server as typed, an IPv6 address in brackets so the port is not read as part of it.
+    fn server_text(&self) -> String {
+        let host = self.host.trim();
+        if host.contains(':') {
+            format!("[{host}]:{}", self.port.trim())
+        } else {
+            format!("{host}:{}", self.port.trim())
+        }
+    }
+
     /// Short state for the tab badge: the live connection, or that we are getting there.
     /// Nothing while off; why it ended and retry details are in the status bar only.
     pub fn badge(&self) -> Option<widgets::Badge> {
@@ -224,13 +256,7 @@ impl ClientTab {
             }
         });
 
-        // An IPv6 address in brackets, so the port is not read as part of it.
-        let host = self.host.trim();
-        let server = if host.contains(':') {
-            format!("[{host}]:{}", self.port.trim())
-        } else {
-            format!("{host}:{}", self.port.trim())
-        };
+        let server = self.server_text();
         let status = self.worker.status.as_str();
         let link = self
             .worker

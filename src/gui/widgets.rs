@@ -114,6 +114,13 @@ impl Badge {
     }
 }
 
+/// "↓ 842 KB/s  ↑ 8.42 KB/s · 5 ms": throughput (rx, tx) and latency as plain text (tray).
+pub fn traffic_line(rx_tx: (u64, u64), rtt: Option<std::time::Duration>) -> String {
+    use crate::log::{format_rate, format_rtt};
+    let rtt = rtt.map_or_else(|| "— ms".to_string(), format_rtt);
+    format!("↓ {}  ↑ {} · {rtt}", format_rate(rx_tx.0), format_rate(rx_tx.1))
+}
+
 /// Small vertical arrow (drawn, not a glyph) whose right edge is at `right`; returns its left edge.
 fn paint_arrow(painter: &egui::Painter, right: f32, y: f32, color: Color32, up: bool) -> f32 {
     let (w, h) = (7.0, 9.0);
