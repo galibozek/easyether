@@ -118,22 +118,7 @@ impl ClientTab {
 
     pub fn ui(&mut self, ui: &mut egui::Ui, settings: &mut Settings, confirm: &mut Option<Confirm>) {
         let running = self.is_running();
-        ui.horizontal(|ui| {
-            widgets::title(ui, "Connect to a shared adapter", "");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .add_enabled(!running, widgets::secondary_button("Network settings"))
-                    .clicked()
-                {
-                    self.net_dialog = Some(NetDialog {
-                        static_ip: settings.static_ipv4_enabled,
-                        address: settings.static_ipv4_address.clone(),
-                        mask: settings.static_ipv4_mask.clone(),
-                        error: String::new(),
-                    });
-                }
-            });
-        });
+        widgets::title(ui, "Connect to a shared adapter", "");
         ui.add_space(4.0);
 
         ui.horizontal(|ui| {
@@ -190,6 +175,8 @@ impl ClientTab {
             });
         });
 
+        // Settings row, like the server's Secure / password / address row: the virtual
+        // adapter's IPv4 setup, and the button that changes it.
         let net = if settings.static_ipv4_enabled {
             format!(
                 "Static {} / {}",
@@ -198,6 +185,26 @@ impl ClientTab {
         } else {
             "Automatic (DHCP)".into()
         };
+        ui.horizontal(|ui| {
+            ui.set_min_height(36.0);
+            widgets::caption(ui, "IPv4");
+            ui.label(RichText::new(net).strong());
+            widgets::muted(ui, format!("on {}", l2::client_adapter_name()));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add_enabled(!running, widgets::secondary_button("Network settings"))
+                    .clicked()
+                {
+                    self.net_dialog = Some(NetDialog {
+                        static_ip: settings.static_ipv4_enabled,
+                        address: settings.static_ipv4_address.clone(),
+                        mask: settings.static_ipv4_mask.clone(),
+                        error: String::new(),
+                    });
+                }
+            });
+        });
+
         let server = format!("{}:{}", self.host.trim(), self.port.trim());
         let status = self.worker.status.as_str();
         let link = self
@@ -208,50 +215,43 @@ impl ClientTab {
             .map(|h| h.client_link())
             .unwrap_or_default();
         let p = widgets::pal(ui);
-        widgets::status_bar(
-            ui,
-            |ui| {
-                // Details the tab does not show: where we are connected, for how long, how
-                // stable it has been, when the next attempt comes, and why it ended.
-                widgets::muted(ui, "Status");
-                if let Some(since) = link.since {
-                    widgets::truncated(ui, server, p.text, true);
-                    widgets::muted(
-                        ui,
-                        format!("· connected {}", crate::log::format_uptime(since.elapsed())),
-                    );
-                    if link.reconnects > 0 {
-                        let text = match link.reconnects {
-                            1 => "· 1 reconnect".to_string(),
-                            n => format!("· {n} reconnects"),
-                        };
-                        widgets::muted(ui, text)
-                            .on_hover_text("Connection losses since Connect, each followed by an automatic reconnect.");
-                    }
-                } else if let (true, Some((reason, next))) = (running, retry(status)) {
-                    let text = if reason.starts_with("Server unreachable") {
-                        format!("{server} unreachable · {next}")
-                    } else {
-                        format!("connection lost · {next}")
+        widgets::status_bar(ui, |ui| {
+            // Details the tab does not show: where we are connected, for how long, how
+            // stable it has been, when the next attempt comes, and why it ended.
+            widgets::muted(ui, "Status");
+            if let Some(since) = link.since {
+                widgets::truncated(ui, server, p.text, true);
+                widgets::muted(
+                    ui,
+                    format!("· connected {}", crate::log::format_uptime(since.elapsed())),
+                );
+                if link.reconnects > 0 {
+                    let text = match link.reconnects {
+                        1 => "· 1 reconnect".to_string(),
+                        n => format!("· {n} reconnects"),
                     };
-                    widgets::truncated(ui, text, p.warn, false);
-                } else if running && status.starts_with("Disconnecting") {
-                    widgets::truncated(ui, "disconnecting…", p.muted, false);
-                } else if running {
-                    widgets::truncated(ui, format!("connecting to {server}…"), p.muted, false);
-                } else if let Some(reason) = status.strip_prefix("Disconnected - error: ") {
-                    widgets::truncated(ui, format!("{reason} · see log"), p.warn, false);
-                } else if status.starts_with("Disconnected - ") {
-                    widgets::truncated(ui, "ended by the server", p.warn, false);
-                } else {
-                    widgets::truncated(ui, "not connected", p.muted, false);
+                    widgets::muted(ui, text)
+                        .on_hover_text("Connection losses since Connect, each followed by an automatic reconnect.");
                 }
-            },
-            |ui| {
-                ui.label(RichText::new(net).strong());
-                widgets::muted(ui, l2::client_adapter_name());
-            },
-        );
+            } else if let (true, Some((reason, next))) = (running, retry(status)) {
+                let text = if reason.starts_with("Server unreachable") {
+                    format!("{server} unreachable · {next}")
+                } else {
+                    format!("connection lost · {next}")
+                };
+                widgets::truncated(ui, text, p.warn, false);
+            } else if running && status.starts_with("Disconnecting") {
+                widgets::truncated(ui, "disconnecting…", p.muted, false);
+            } else if running {
+                widgets::truncated(ui, format!("connecting to {server}…"), p.muted, false);
+            } else if let Some(reason) = status.strip_prefix("Disconnected - error: ") {
+                widgets::truncated(ui, format!("{reason} · see log"), p.warn, false);
+            } else if status.starts_with("Disconnected - ") {
+                widgets::truncated(ui, "ended by the server", p.warn, false);
+            } else {
+                widgets::truncated(ui, "not connected", p.muted, false);
+            }
+        });
 
         self.worker.log.ui(ui, "Client Log");
         self.net_dialog_ui(ui.ctx(), settings);
