@@ -42,7 +42,7 @@ pub struct App {
     driver_prompt: Vec<&'static str>,
     tray: Option<tray::Tray>,
     tray_hint_shown: bool,
-    /// Whether the window was minimized in the previous frame (minimize → tray).
+    /// Whether the window was minimized in the previous frame (minimizing goes to the tray).
     was_minimized: bool,
     /// "Cannot exit while drivers are being installed" notice.
     install_notice: bool,

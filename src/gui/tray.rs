@@ -106,7 +106,7 @@ impl Tray {
         self.ctx.request_repaint();
     }
 
-    /// Hides the window (minimize → tray).
+    /// Hides the window (minimizing goes to the tray).
     pub fn hide_window(&self) {
         #[cfg(windows)]
         {

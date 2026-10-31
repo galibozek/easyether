@@ -386,12 +386,14 @@ unsafe impl Send for RecvBatch {}
 
 impl RecvBatch {
     fn new() -> RecvBatch {
-        // SAFETY: plain C structs; all-zero is a valid value for each of them.
         RecvBatch {
             data: vec![0u8; MAX_BATCH * MAX_FRAME],
+            // SAFETY: sockaddr_ll is plain old data; all-zero is a valid value.
             names: vec![unsafe { zeroed() }; MAX_BATCH],
             controls: vec![[0u64; 8]; MAX_BATCH],
+            // SAFETY: iovec is plain old data; all-zero is a valid value.
             iovs: vec![unsafe { zeroed() }; MAX_BATCH],
+            // SAFETY: mmsghdr is plain old data; all-zero is a valid value.
             msgs: vec![unsafe { zeroed() }; MAX_BATCH],
         }
     }
@@ -433,10 +435,11 @@ unsafe impl Send for SendBatch {}
 
 impl SendBatch {
     fn new() -> SendBatch {
-        // SAFETY: plain C structs; all-zero is a valid value for each of them.
         SendBatch {
             pads: vec![[0u8; MIN_ETH_FRAME]; MAX_BATCH],
+            // SAFETY: iovec is plain old data; all-zero is a valid value.
             iovs: vec![unsafe { zeroed() }; MAX_BATCH],
+            // SAFETY: mmsghdr is plain old data; all-zero is a valid value.
             msgs: vec![unsafe { zeroed() }; MAX_BATCH],
         }
     }
@@ -512,7 +515,9 @@ mod tests {
         let b = UdpSocket::bind("127.0.0.1:0").unwrap();
         a.connect(b.local_addr().unwrap()).unwrap();
         b.connect(a.local_addr().unwrap()).unwrap();
-        // Room for a few hundred small datagrams in the kernel queue.
+        // As much queue as the system allows. Usually capped by net.core.rmem_max (often the
+        // default 208 KiB, e.g. on CI), which holds about 300 small datagrams on loopback, so
+        // the tests below never queue many more than one batch at a time.
         for s in [&a, &b] {
             socket2::SockRef::from(s).set_recv_buffer_size(4 << 20).unwrap();
         }
@@ -524,6 +529,19 @@ mod tests {
 
     fn frame(len: usize, fill: u8) -> Vec<u8> {
         vec![fill; len]
+    }
+
+    /// Whether `sock`'s receive queue can hold a bit more than one batch of small datagrams at
+    /// once. A full UDP queue drops datagrams, and without root a test cannot grow the queue
+    /// beyond net.core.rmem_max; with the default limit (208 KiB, doubled by the kernel, as on
+    /// CI) it fits. Tests that need it are skipped, with a note, on systems below that.
+    fn queue_holds_a_batch(sock: &impl std::os::fd::AsFd) -> bool {
+        let queue = socket2::SockRef::from(sock).recv_buffer_size().unwrap();
+        let ok = queue >= 400_000;
+        if !ok {
+            eprintln!("skipped: socket queue is {queue} bytes, too small for one batch of datagrams");
+        }
+        ok
     }
 
     #[test]
@@ -550,19 +568,23 @@ mod tests {
 
     #[test]
     fn recv_caps_a_batch_at_max_and_keeps_the_rest() {
+        const EXTRA: usize = 4;
         let (port, peer, _log) = udp_port();
-        for i in 0..(MAX_BATCH + 44) {
-            peer.send(&frame(100, i as u8)).unwrap();
+        if !queue_holds_a_batch(&port.fd) {
+            return;
+        }
+        for i in 0..(MAX_BATCH + EXTRA) {
+            peer.send(&frame(MIN_FRAME, i as u8)).unwrap();
         }
         let mut out = Vec::new();
         port.recv(&mut out, Duration::from_secs(2)).unwrap();
         assert_eq!(out.len(), MAX_BATCH);
         let mut rest = Vec::new();
         port.recv(&mut rest, Duration::from_secs(2)).unwrap();
-        assert_eq!(rest.len(), 44);
+        assert_eq!(rest.len(), EXTRA);
         // Order is preserved across the two batches.
         let all: Vec<u8> = out.iter().chain(&rest).map(|f| f[0]).collect();
-        assert_eq!(all, (0..(MAX_BATCH + 44)).map(|i| i as u8).collect::<Vec<_>>());
+        assert_eq!(all, (0..(MAX_BATCH + EXTRA)).map(|i| i as u8).collect::<Vec<_>>());
     }
 
     #[test]
@@ -584,12 +606,20 @@ mod tests {
     #[test]
     fn send_splits_into_batches() {
         let (port, peer, _log) = udp_port();
-        let frames: Vec<Vec<u8>> = (0..(MAX_BATCH + 10)).map(|i| frame(100, i as u8)).collect();
-        port.send(&frames).unwrap();
-        let mut buf = [0u8; 200];
-        for (i, f) in frames.iter().enumerate() {
-            let n = peer.recv(&mut buf).unwrap_or_else(|e| panic!("datagram {i}: {e}"));
-            assert_eq!(&buf[..n], &f[..]);
+        if !queue_holds_a_batch(&peer) {
+            return;
         }
+        let frames: Vec<Vec<u8>> = (0..(MAX_BATCH + 10)).map(|i| frame(100, i as u8)).collect();
+        // The peer also reads while the port sends, which leaves extra headroom in its queue.
+        let expected = frames.clone();
+        let reader = std::thread::spawn(move || {
+            let mut buf = [0u8; 200];
+            for (i, f) in expected.iter().enumerate() {
+                let n = peer.recv(&mut buf).unwrap_or_else(|e| panic!("datagram {i}: {e}"));
+                assert_eq!(&buf[..n], &f[..], "datagram {i}");
+            }
+        });
+        port.send(&frames).unwrap();
+        reader.join().unwrap();
     }
 }

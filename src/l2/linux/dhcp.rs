@@ -2,7 +2,7 @@
 //! created by another program alone, so in "Automatic" mode we run dhcpcd on it ourselves:
 //! IPv4 only, no routes other than the on-link subnet (the remote network must not take over
 //! the host's traffic), no hook script (DNS, hostname, NTP stay untouched), falling back to
-//! IPv4LL (169.254/16) when nobody answers – which is what many vehicles expect for DoIP.
+//! IPv4LL (169.254/16) when nobody answers, which is what many vehicles expect for DoIP.
 
 use std::io;
 use std::os::unix::process::CommandExt;
