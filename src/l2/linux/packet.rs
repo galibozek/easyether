@@ -18,8 +18,10 @@ const PACKET_IGNORE_OUTGOING: libc::c_int = 23;
 /// drivers raise that above 14 by their TX header (rndis_host 58, lan78xx/smsc95xx 22,
 /// asix 18). A 42-byte ARP request from the peer would never get out otherwise.
 const MIN_ETH_FRAME: usize = 60;
-/// Receive queue of the raw socket. The default (net.core.rmem_default, about 200 KiB or
-/// 130 frames) overflows while the sender thread is busy writing a batch to the peer.
+/// Receive queue of the raw socket. The default (net.core.rmem_default, about 200 KiB) holds
+/// only 50 to 90 full-size frames, because the kernel charges each frame's whole buffer
+/// (truesize), not just its bytes; it overflows while the sender thread is busy writing a
+/// batch to the peer. 4 MiB holds roughly 1000 to 1800.
 const RECV_QUEUE_BYTES: libc::c_int = 4 << 20;
 const TP_STATUS_VLAN_VALID: u32 = 1 << 4;
 const TP_STATUS_VLAN_TPID_VALID: u32 = 1 << 6;
@@ -45,6 +47,8 @@ pub struct PacketPort {
     warned_rejected: std::sync::atomic::AtomicBool,
     /// Buffers for `recvmmsg`, reused across calls (about 400 KiB).
     rx: Mutex<RecvBatch>,
+    /// Headers and padding for `sendmmsg`, reused across calls (about 35 KiB).
+    tx: Mutex<SendBatch>,
 }
 
 impl Drop for PacketPort {
@@ -226,6 +230,7 @@ impl PacketPort {
             warned_oversized: std::sync::atomic::AtomicBool::new(false),
             warned_rejected: std::sync::atomic::AtomicBool::new(false),
             rx: Mutex::new(RecvBatch::new()),
+            tx: Mutex::new(SendBatch::new()),
         };
         port.drain();
         log.info(format!("Raw socket opened on '{ifname}' (promiscuous mode)."));
@@ -284,6 +289,56 @@ impl PacketPort {
             }
         }
         Ok(n)
+    }
+
+    /// Sends up to `MAX_BATCH` frames with as few `sendmmsg` calls as possible. A frame the
+    /// kernel refuses is skipped and the rest still goes out.
+    fn send_batch(&self, frames: &[Vec<u8>]) -> io::Result<()> {
+        let mut guard = self.tx.lock().unwrap();
+        let b = &mut *guard;
+        let n = frames.len().min(MAX_BATCH);
+        b.prepare(&frames[..n]);
+        let mut i = 0;
+        while i < n {
+            // SAFETY: msgs[i..n] were just prepared and point into `frames` and `b.pads`, both
+            // alive for the whole call.
+            let sent = unsafe {
+                libc::sendmmsg(
+                    self.fd.as_raw_fd(),
+                    b.msgs[i..n].as_mut_ptr(),
+                    (n - i) as libc::c_uint,
+                    0,
+                )
+            };
+            if sent >= 0 {
+                i += (sent as usize).max(1);
+                continue;
+            }
+            // sendmmsg reports an error only when the first message fails; after a partial
+            // success the next round starts at the failed message and lands here with its errno.
+            let e = io::Error::last_os_error();
+            if e.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            // Full queue or a frame larger than the interface MTU: drop it, like a switch would.
+            if would_block(&e) || matches!(e.raw_os_error(), Some(libc::EMSGSIZE) | Some(libc::ENETDOWN)) {
+                i += 1;
+                continue;
+            }
+            // The driver refused this frame (see MIN_ETH_FRAME); the adapter itself is fine.
+            if e.raw_os_error() == Some(libc::EINVAL) {
+                if !self.warned_rejected.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    self.log.warn(format!(
+                        "The driver of '{}' rejected a {}-byte frame (EINVAL); such frames are dropped.",
+                        self.ifname, b.iovs[i].iov_len
+                    ));
+                }
+                i += 1;
+                continue;
+            }
+            return Err(e);
+        }
+        Ok(())
     }
 }
 
@@ -362,6 +417,53 @@ impl RecvBatch {
     }
 }
 
+/// Reusable headers for `sendmmsg`, plus a padding buffer per slot for frames shorter than
+/// MIN_ETH_FRAME (all slots are handed to the kernel at once, so each needs its own).
+struct SendBatch {
+    pads: Vec<[u8; MIN_ETH_FRAME]>,
+    iovs: Vec<libc::iovec>,
+    msgs: Vec<libc::mmsghdr>,
+}
+
+// SAFETY: the raw pointers inside `iovs`/`msgs` point into `pads` or into the caller's frames
+// and are rewritten by `prepare` before every use; between calls they are never read, so the
+// struct can move between threads like the plain buffers it owns.
+unsafe impl Send for SendBatch {}
+
+impl SendBatch {
+    fn new() -> SendBatch {
+        // SAFETY: plain C structs; all-zero is a valid value for each of them.
+        SendBatch {
+            pads: vec![[0u8; MIN_ETH_FRAME]; MAX_BATCH],
+            iovs: vec![unsafe { zeroed() }; MAX_BATCH],
+            msgs: vec![unsafe { zeroed() }; MAX_BATCH],
+        }
+    }
+
+    /// Points one header per frame at the frame, or at its zero-padded copy when it is short.
+    fn prepare(&mut self, frames: &[Vec<u8>]) {
+        for (i, f) in frames.iter().enumerate() {
+            let (ptr, len) = if f.len() < MIN_ETH_FRAME {
+                let pad = &mut self.pads[i];
+                pad[..f.len()].copy_from_slice(f);
+                pad[f.len()..].fill(0);
+                (pad.as_ptr(), MIN_ETH_FRAME)
+            } else {
+                (f.as_ptr(), f.len())
+            };
+            self.iovs[i] = libc::iovec {
+                iov_base: ptr as *mut libc::c_void,
+                iov_len: len,
+            };
+            // SAFETY: msghdr is plain old data; no name and no control data are sent.
+            let mut h: libc::msghdr = unsafe { zeroed() };
+            h.msg_iov = &mut self.iovs[i];
+            h.msg_iovlen = 1;
+            self.msgs[i] = libc::mmsghdr { msg_hdr: h, msg_len: 0 };
+        }
+    }
+}
+
 impl L2Port for PacketPort {
     fn link_up(&self) -> Option<bool> {
         let carrier = std::fs::read_to_string(format!("/sys/class/net/{}/carrier", self.ifname)).ok()?;
@@ -387,69 +489,6 @@ impl L2Port for PacketPort {
     fn send(&self, frames: &[Vec<u8>]) -> io::Result<()> {
         for chunk in frames.chunks(MAX_BATCH) {
             self.send_batch(chunk)?;
-        }
-        Ok(())
-    }
-}
-
-impl PacketPort {
-    /// Sends up to `MAX_BATCH` frames with as few `sendmmsg` calls as possible. A frame the
-    /// kernel refuses is skipped and the rest still goes out.
-    fn send_batch(&self, frames: &[Vec<u8>]) -> io::Result<()> {
-        // Short frames are padded to MIN_ETH_FRAME; each needs its own copy because all slots
-        // are handed to the kernel at once.
-        let mut pads = [[0u8; MIN_ETH_FRAME]; MAX_BATCH];
-        // SAFETY: plain C structs; all-zero is a valid value (no name, no control data).
-        let mut iovs: [libc::iovec; MAX_BATCH] = unsafe { zeroed() };
-        let mut msgs: [libc::mmsghdr; MAX_BATCH] = unsafe { zeroed() };
-        for (i, f) in frames.iter().enumerate() {
-            let (ptr, len) = if f.len() < MIN_ETH_FRAME {
-                pads[i][..f.len()].copy_from_slice(f);
-                (pads[i].as_ptr(), MIN_ETH_FRAME)
-            } else {
-                (f.as_ptr(), f.len())
-            };
-            iovs[i] = libc::iovec {
-                iov_base: ptr as *mut libc::c_void,
-                iov_len: len,
-            };
-            msgs[i].msg_hdr.msg_iov = &mut iovs[i];
-            msgs[i].msg_hdr.msg_iovlen = 1;
-        }
-        let n = frames.len();
-        let mut i = 0;
-        while i < n {
-            // SAFETY: msgs[i..n] are initialised and point into `frames`/`pads`, which outlive
-            // the call.
-            let sent =
-                unsafe { libc::sendmmsg(self.fd.as_raw_fd(), msgs[i..].as_mut_ptr(), (n - i) as libc::c_uint, 0) };
-            if sent >= 0 {
-                i += (sent as usize).max(1);
-                continue;
-            }
-            // sendmmsg reports an error only when the first message fails; after a partial
-            // success the next round starts at the failed message and lands here with its errno.
-            let e = io::Error::last_os_error();
-            if e.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            // Full queue or a frame larger than the interface MTU: drop it, like a switch would.
-            if would_block(&e) || matches!(e.raw_os_error(), Some(libc::EMSGSIZE) | Some(libc::ENETDOWN)) {
-                i += 1;
-                continue;
-            }
-            // The driver refused this frame (see MIN_ETH_FRAME); the adapter itself is fine.
-            if e.raw_os_error() == Some(libc::EINVAL) {
-                if !self.warned_rejected.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                    self.log.warn(format!(
-                        "The driver of '{}' rejected a {}-byte frame (EINVAL); such frames are dropped.",
-                        self.ifname, iovs[i].iov_len
-                    ));
-                }
-                i += 1;
-                continue;
-            }
-            return Err(e);
         }
         Ok(())
     }

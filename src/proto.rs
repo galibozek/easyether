@@ -185,6 +185,8 @@ impl BatchDecoder {
 
     /// Lets a reader append incoming bytes directly, saving a copy. Whatever is appended
     /// stays after the pending data; the caller must not touch what is already there.
+    /// Call `next` until it returns `None` before appending again: only that compacts the
+    /// buffer, so skipping it lets consumed messages pile up in front.
     pub fn buffer_mut(&mut self) -> &mut Vec<u8> {
         &mut self.buf
     }
