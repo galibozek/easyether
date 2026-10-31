@@ -19,6 +19,10 @@ pub fn list_adapters() -> io::Result<Vec<AdapterInfo>> {
     Ok(Vec::new())
 }
 
+pub fn local_ipv4() -> Vec<(String, Ipv4Addr)> {
+    Vec::new()
+}
+
 pub fn server_opener(_id: &str, _log: &Logger) -> super::Opener {
     Box::new(|| Err(unsupported()))
 }

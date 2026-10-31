@@ -16,6 +16,8 @@ pub struct ServerTab {
     port: String,
     password: String,
     local_ip: String,
+    /// All IPv4 addresses with their interface names, for the "My address" hover.
+    addresses: Vec<(String, std::net::Ipv4Addr)>,
     #[cfg(windows)]
     installer: Option<std::thread::JoinHandle<()>>,
     #[cfg(windows)]
@@ -46,6 +48,7 @@ impl ServerTab {
             port: settings.server_port.to_string(),
             password: secure::generate_password(),
             local_ip: local_ip(),
+            addresses: l2::local_ipv4(),
             #[cfg(windows)]
             installer: None,
             #[cfg(windows)]
@@ -57,6 +60,7 @@ impl ServerTab {
 
     fn refresh(&mut self, settings: &Settings) {
         self.local_ip = local_ip();
+        self.addresses = l2::local_ipv4();
         #[cfg(windows)]
         {
             self.drivers = Some(crate::l2::windows::install::status());
@@ -251,10 +255,31 @@ impl ServerTab {
                 ui.label(RichText::new("anyone who reaches this port can join").color(warn))
                     .on_hover_text("No encryption and no password. Use it only on a trusted LAN.");
             }
-            // What to give the client, on the right of the settings row.
-            let address = format!("{}:{}", self.local_ip, self.port.trim());
+            // What to give the client, on the right of the settings row: a click copies it, the
+            // hover lists every address of this computer (the client may be on another network).
+            let port = self.port.trim();
+            let address = format!("{}:{port}", self.local_ip);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new(address).strong());
+                let resp = ui
+                    .add(egui::Label::new(RichText::new(&address).strong()).sense(egui::Sense::click()))
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_ui(|ui| {
+                        ui.label("Click to copy.");
+                        if !self.addresses.is_empty() {
+                            ui.add_space(4.0);
+                            widgets::muted(ui, "All addresses of this computer:");
+                            egui::Grid::new("my_addresses").num_columns(2).show(ui, |ui| {
+                                for (name, ip) in &self.addresses {
+                                    ui.label(format!("{ip}:{port}"));
+                                    widgets::muted(ui, name);
+                                    ui.end_row();
+                                }
+                            });
+                        }
+                    });
+                if resp.clicked() {
+                    ui.ctx().copy_text(address.clone());
+                }
                 widgets::caption(ui, "My address");
             });
         });

@@ -197,6 +197,11 @@ pub fn list_adapters() -> io::Result<Vec<AdapterInfo>> {
     platform::list_adapters()
 }
 
+/// IPv4 addresses of this computer (loopback excluded) with their interface names, sorted.
+pub fn local_ipv4() -> Vec<(String, std::net::Ipv4Addr)> {
+    platform::local_ipv4()
+}
+
 /// Opens a physical adapter for sharing (server side), watched for disappearance.
 pub fn open_server(id: &str, name: &str, log: &Logger) -> io::Result<ResilientPort> {
     ResilientPort::open(name, platform::server_opener(id, log), log)

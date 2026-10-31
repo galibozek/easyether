@@ -126,12 +126,19 @@ impl ClientTab {
             let host_width = (ui.available_width() - 468.0).max(180.0);
             ui.vertical(|ui| {
                 widgets::caption(ui, "Server address");
-                ui.add_enabled(
+                let edit = ui.add_enabled(
                     !running,
                     egui::TextEdit::singleline(&mut self.host)
                         .hint_text("IPv4, IPv6 or host name")
                         .desired_width(host_width),
                 );
+                // "address:port" as given by the server ("My address"): the port goes to its field.
+                if edit.changed()
+                    && let Some((host, port)) = split_host_port(&self.host)
+                {
+                    self.host = host;
+                    self.port = port.to_string();
+                }
             });
             ui.vertical(|ui| {
                 widgets::caption(ui, "Port");
@@ -332,9 +339,35 @@ fn retry(status: &str) -> Option<(&str, String)> {
     Some((reason, format!("retry in {secs} s (#{attempt})")))
 }
 
+/// "1.2.3.4:5000", "[fe80::1]:5000" or "host:5000" split into address and port. A bare IPv6
+/// address ("fe80::1") is left alone.
+fn split_host_port(text: &str) -> Option<(String, u16)> {
+    let text = text.trim();
+    if let Ok(addr) = text.parse::<std::net::SocketAddr>() {
+        return Some((addr.ip().to_string(), addr.port()));
+    }
+    let (host, port) = text.split_once(':')?;
+    if host.is_empty() || host.contains(':') || port.contains(':') {
+        return None;
+    }
+    Some((host.to_string(), port.parse().ok()?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pasted_port_is_split_off() {
+        let split = split_host_port;
+        assert_eq!(split("192.168.10.116:5000"), Some(("192.168.10.116".into(), 5000)));
+        assert_eq!(split(" [fe80::1]:5000 "), Some(("fe80::1".into(), 5000)));
+        assert_eq!(split("vci.local:6000"), Some(("vci.local".into(), 6000)));
+        assert_eq!(split("fe80::1"), None);
+        assert_eq!(split("192.168.10.116"), None);
+        assert_eq!(split("192.168.10.116:"), None);
+        assert_eq!(split("host:99999"), None);
+    }
 
     #[test]
     fn retry_status_is_shortened() {

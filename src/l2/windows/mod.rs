@@ -31,6 +31,8 @@ pub fn list_adapters() -> io::Result<Vec<AdapterInfo>> {
     selow::list_adapters()
 }
 
+pub use ipconfig::local_ipv4;
+
 /// Opens SeLow adapter `id` (its GUID) each time it is called. A USB adapter plugged into a
 /// different port often comes back as a new device with a new GUID; then the adapter with the
 /// same MAC is used instead, provided exactly one adapter has it.
