@@ -256,15 +256,15 @@ struct Counters {
 /// How often the session's state goes to the log, so a slowdown can be traced afterwards.
 const LINK_REPORT: Duration = Duration::from_secs(30);
 
-/// Round trip shown while our latest ping is unanswered: the measured one, or the time it has
-/// been waiting if that is longer (so a stalled link shows a growing latency, not an old one).
-/// Before the first pong the wait is shown only once it is clearly a stall, not as a guess.
+/// The round trip shown: the last measured one, or, once our latest ping has waited a second or
+/// more, that wait (a stalled link shows a growing latency, not an old one). A shorter wait is
+/// not shown: it includes the time the peer holds a ping until its next adapter poll (up to
+/// 50 ms), which the measurement subtracts, so it would make the latency jump for nothing.
 fn shown_rtt(measured_us: u64, waiting: Option<Duration>) -> Option<Duration> {
     let measured = (measured_us > 0).then(|| Duration::from_micros(measured_us));
-    match (measured, waiting) {
-        (Some(m), Some(w)) => Some(m.max(w)),
-        (None, Some(w)) if w >= Duration::from_secs(1) => Some(w),
-        (m, _) => m,
+    match waiting {
+        Some(w) if w >= Duration::from_secs(1) => Some(measured.map_or(w, |m| m.max(w))),
+        _ => measured,
     }
 }
 
@@ -1444,6 +1444,8 @@ mod tests {
         assert_eq!(shown_rtt(0, None), None);
         assert_eq!(shown_rtt(5_000, None), Some(ms(5)));
         assert_eq!(shown_rtt(5_000, Some(ms(2))), Some(ms(5)));
+        // A ping held up to 50 ms by the peer's adapter poll does not make the latency jump.
+        assert_eq!(shown_rtt(5_000, Some(ms(60))), Some(ms(5)));
         assert_eq!(shown_rtt(5_000, Some(ms(1500))), Some(ms(1500)));
         assert_eq!(shown_rtt(0, Some(ms(800))), None);
         assert_eq!(shown_rtt(0, Some(ms(1500))), Some(ms(1500)));
