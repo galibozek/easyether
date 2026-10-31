@@ -36,10 +36,12 @@ impl std::fmt::Display for LogLine {
 pub enum Event {
     Log(LogLine),
     Status(String),
-    /// Current tunnel throughput in bytes per second (received from / sent to the peer).
+    /// Current tunnel throughput in bytes per second (received from / sent to the peer) and
+    /// round-trip time through the tunnel, when measured.
     Traffic {
         rx: u64,
         tx: u64,
+        rtt: Option<std::time::Duration>,
     },
 }
 
@@ -87,8 +89,20 @@ impl Logger {
         self.send(Event::Status(status.into()))
     }
 
-    pub fn traffic(&self, rx: u64, tx: u64) {
-        self.send(Event::Traffic { rx, tx })
+    pub fn traffic(&self, rx: u64, tx: u64, rtt: Option<std::time::Duration>) {
+        self.send(Event::Traffic { rx, tx, rtt })
+    }
+}
+
+/// "0.4 ms", "23 ms", "1.2 s": a round-trip time as shown next to the throughput.
+pub fn format_rtt(rtt: std::time::Duration) -> String {
+    let ms = rtt.as_secs_f64() * 1000.0;
+    if ms < 10.0 {
+        format!("{ms:.1} ms")
+    } else if ms < 1000.0 {
+        format!("{ms:.0} ms")
+    } else {
+        format!("{:.1} s", ms / 1000.0)
     }
 }
 

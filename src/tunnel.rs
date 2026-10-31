@@ -205,6 +205,26 @@ struct Counters {
     from_peer: AtomicU64,
     tx_bytes: AtomicU64,
     rx_bytes: AtomicU64,
+    /// A ping from the peer still to be answered: its token and when it arrived. Answered by
+    /// the sending thread, so the receiving thread never blocks on a send (with both sides'
+    /// receivers blocked on full send buffers, neither would read again).
+    pending_pong: Mutex<Option<(u64, Instant)>>,
+    /// Token of our latest ping; only its pong counts.
+    last_ping: AtomicU64,
+    /// Whether the latest ping was answered.
+    ping_answered: AtomicBool,
+    /// Last measured round trip in microseconds; 0 while none.
+    rtt_us: AtomicU64,
+}
+
+/// Round trip shown while our latest ping is unanswered: the measured one, or the time it has
+/// been waiting if that is longer (so a stalled link shows a growing latency, not an old one).
+fn shown_rtt(measured_us: u64, waiting: Option<Duration>) -> Option<Duration> {
+    let measured = (measured_us > 0).then(|| Duration::from_micros(measured_us));
+    match (measured, waiting) {
+        (Some(m), Some(w)) => Some(m.max(w)),
+        (m, w) => m.or(w),
+    }
 }
 
 /// Why a session ended.
@@ -230,6 +250,9 @@ fn run_session(
     let stream = Arc::new(stream);
     let done = Arc::new(AtomicBool::new(false));
     let counters = Arc::new(Counters::default());
+    // Ping tokens are nanoseconds since this instant (never 0), so a pong tells when its ping
+    // was sent without keeping a table.
+    let base = Instant::now();
     port.drain();
 
     // Device -> peer, plus keepalives.
@@ -247,10 +270,12 @@ fn run_session(
             let mut buf = Vec::new();
             let mut last_send = Instant::now();
             let (mut last_report, mut prev_tx, mut prev_rx) = (Instant::now(), 0u64, 0u64);
-            let mut last_rates = (0u64, 0u64);
+            let mut last_shown = ((0u64, 0u64), None::<u64>);
+            // When our latest ping was sent.
+            let mut ping_sent: Option<Instant> = None;
             let end = loop {
-                // Throughput for the GUI, once a second (skipped while idle so the GUI is not
-                // repainted for nothing).
+                // Throughput and latency for the GUI, once a second (only sent when they
+                // change, so an idle GUI is not repainted for nothing), and the next ping.
                 let elapsed = last_report.elapsed();
                 if elapsed >= Duration::from_secs(1) {
                     let (tx_b, rx_b) = (
@@ -262,11 +287,28 @@ fn run_session(
                         ((rx_b - prev_rx) as f64 / secs) as u64,
                         ((tx_b - prev_tx) as f64 / secs) as u64,
                     );
-                    if rates != last_rates {
-                        log.traffic(rates.0, rates.1);
-                        last_rates = rates;
+                    let waiting = ping_sent
+                        .filter(|_| !counters.ping_answered.load(Ordering::Relaxed))
+                        .map(|t| t.elapsed());
+                    let rtt = shown_rtt(counters.rtt_us.load(Ordering::Relaxed), waiting);
+                    // Compared at 0.1 ms, the precision shown.
+                    let shown = (rates, rtt.map(|d| d.as_micros() as u64 / 100));
+                    if shown != last_shown {
+                        log.traffic(rates.0, rates.1, rtt);
+                        last_shown = shown;
                     }
                     (last_report, prev_tx, prev_rx) = (Instant::now(), tx_b, rx_b);
+
+                    let token = (base.elapsed().as_nanos() as u64).max(1);
+                    counters.last_ping.store(token, Ordering::Relaxed);
+                    counters.ping_answered.store(false, Ordering::Relaxed);
+                    proto::encode_ping(token, &mut buf);
+                    counters.tx_bytes.fetch_add(buf.len() as u64, Ordering::Relaxed);
+                    ping_sent = Some(Instant::now());
+                    if let Err(e) = stream.send(&buf) {
+                        break End::Peer(e.to_string());
+                    }
+                    last_send = Instant::now();
                 }
                 if stop.load(Ordering::SeqCst) {
                     // Tell the peer this is intentional (best effort; the link may be dead).
@@ -280,6 +322,18 @@ fn run_session(
                 frames.clear();
                 if let Err(e) = port.recv(&mut frames, POLL) {
                     break End::Adapter(e.to_string());
+                }
+                // Answer the peer's ping. It may have waited here up to one poll interval (or
+                // behind a long send); that wait is reported so the peer can subtract it.
+                let pong = counters.pending_pong.lock().unwrap().take();
+                if let Some((token, arrived)) = pong {
+                    let hold_us = arrived.elapsed().as_micros().min(u32::MAX as u128) as u32;
+                    proto::encode_pong(token, hold_us, &mut buf);
+                    counters.tx_bytes.fetch_add(buf.len() as u64, Ordering::Relaxed);
+                    if let Err(e) = stream.send(&buf) {
+                        break End::Peer(e.to_string());
+                    }
+                    last_send = Instant::now();
                 }
                 let result = if !frames.is_empty() {
                     counters.to_peer.fetch_add(frames.len() as u64, Ordering::Relaxed);
@@ -335,6 +389,24 @@ fn run_session(
             match dec.next(&mut frames) {
                 Ok(None) => break,
                 Ok(Some(proto::Msg::Close)) => break 'outer End::PeerClosed,
+                Ok(Some(proto::Msg::Ping(token))) => {
+                    *counters.pending_pong.lock().unwrap() = Some((token, Instant::now()));
+                }
+                Ok(Some(proto::Msg::Pong { token, hold_us })) => {
+                    // Only the pong to our latest ping counts; a token that is not ours (or
+                    // would overflow the clock) is ignored.
+                    if token == counters.last_ping.load(Ordering::Relaxed)
+                        && let Some(sent) = base.checked_add(Duration::from_nanos(token))
+                    {
+                        let rtt = Instant::now()
+                            .saturating_duration_since(sent)
+                            .saturating_sub(Duration::from_micros(hold_us.into()));
+                        counters
+                            .rtt_us
+                            .store((rtt.as_micros() as u64).max(1), Ordering::Relaxed);
+                        counters.ping_answered.store(true, Ordering::Relaxed);
+                    }
+                }
                 Ok(Some(proto::Msg::Batch)) if frames.is_empty() => {}
                 Ok(Some(proto::Msg::Batch)) => {
                     counters.from_peer.fetch_add(frames.len() as u64, Ordering::Relaxed);
@@ -349,7 +421,7 @@ fn run_session(
     done.store(true, Ordering::SeqCst);
     stream.shutdown();
     let tx_end = tx.join().unwrap_or(End::Peer("sender thread panicked".into()));
-    log.traffic(0, 0);
+    log.traffic(0, 0, None);
 
     log.info(format!(
         "Frames forwarded: {} to the peer, {} from the peer.",
@@ -1200,6 +1272,44 @@ mod tests {
         client_stop.store(true, Ordering::SeqCst);
         assert!(matches!(client.join().unwrap(), End::Stopped));
         assert!(matches!(server.join().unwrap(), End::PeerClosed));
+    }
+
+    #[test]
+    fn latency_is_measured_through_the_tunnel() {
+        let (s, c) = pair();
+        let (log, events) = Logger::new(None);
+        let stop = Arc::new(AtomicBool::new(false));
+        let server = session(s, Arc::new(AtomicBool::new(false)));
+        let client = {
+            let stop = stop.clone();
+            std::thread::spawn(move || run_session(c, Arc::new(NullPort), &stop, None, &log))
+        };
+        // One ping a second; the second report carries the first measurement.
+        std::thread::sleep(Duration::from_millis(2300));
+        stop.store(true, Ordering::SeqCst);
+        assert!(matches!(client.join().unwrap(), End::Stopped));
+        assert!(matches!(server.join().unwrap(), End::PeerClosed));
+        let rtts: Vec<Duration> = events
+            .try_iter()
+            .filter_map(|e| match e {
+                crate::log::Event::Traffic { rtt, .. } => rtt,
+                _ => None,
+            })
+            .collect();
+        assert!(!rtts.is_empty(), "no latency was reported");
+        // Loopback: well under the 50 ms poll interval the pong may wait for, which is
+        // reported by the peer and subtracted.
+        assert!(rtts.iter().all(|r| *r < Duration::from_millis(20)), "{rtts:?}");
+    }
+
+    #[test]
+    fn shown_latency_grows_while_a_ping_is_unanswered() {
+        let ms = Duration::from_millis;
+        assert_eq!(shown_rtt(0, None), None);
+        assert_eq!(shown_rtt(5_000, None), Some(ms(5)));
+        assert_eq!(shown_rtt(5_000, Some(ms(2))), Some(ms(5)));
+        assert_eq!(shown_rtt(5_000, Some(ms(1500))), Some(ms(1500)));
+        assert_eq!(shown_rtt(0, Some(ms(800))), Some(ms(800)));
     }
 
     /// The tunnel socket keeps OS-tuned buffers and, on Linux, a bounded not-yet-sent queue.

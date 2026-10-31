@@ -95,6 +95,7 @@ pub struct Badge {
     pub state: &'static str,
     pub activity: Activity,
     pub traffic: Option<(u64, u64)>,
+    pub rtt: Option<std::time::Duration>,
 }
 
 impl Badge {
@@ -103,11 +104,14 @@ impl Badge {
             state,
             activity,
             traffic: None,
+            rtt: None,
         }
     }
 
-    pub fn traffic(mut self, rx_tx: (u64, u64)) -> Badge {
+    /// Throughput (rx, tx) and, once measured, the round-trip time through the tunnel.
+    pub fn traffic(mut self, rx_tx: (u64, u64), rtt: Option<std::time::Duration>) -> Badge {
         self.traffic = Some(rx_tx);
+        self.rtt = rtt;
         self
     }
 }
@@ -138,24 +142,21 @@ fn paint_arrow(painter: &egui::Painter, right: f32, y: f32, color: Color32, up: 
     right - w
 }
 
-/// Tab badge, right-aligned at (`right`, `y`): `● State · ↓ rx ↑ tx`.
-pub fn paint_badge(
-    painter: &egui::Painter,
-    right: f32,
-    y: f32,
-    color: Color32,
-    state: &str,
-    activity: Activity,
-    traffic: Option<(u64, u64)>,
-) {
+/// Tab badge, right-aligned at (`right`, `y`): `● State · ↓ rx ↑ tx · rtt`.
+pub fn paint_badge(painter: &egui::Painter, right: f32, y: f32, color: Color32, badge: &Badge) {
     let font = egui::FontId::proportional(12.5);
     let text_right = |x: f32, s: &str| -> f32 {
         painter
             .text(egui::pos2(x, y), egui::Align2::RIGHT_CENTER, s, font.clone(), color)
             .left()
     };
+    let (state, activity) = (badge.state, badge.activity);
     let mut x = right;
-    if let Some((rx, tx)) = traffic {
+    if let Some(rtt) = badge.rtt {
+        x = text_right(x, &crate::log::format_rtt(rtt)) - 6.0;
+        x = text_right(x, "·") - 6.0;
+    }
+    if let Some((rx, tx)) = badge.traffic {
         x = text_right(x, &crate::log::format_rate(tx)) - 3.0;
         x = paint_arrow(painter, x, y, color, true) - 7.0;
         x = text_right(x, &crate::log::format_rate(rx)) - 3.0;
