@@ -372,10 +372,8 @@ pub fn status_bar(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui)) {
 }
 
 /// A truncated label (full text on hover), for the left side of the status bar.
-pub fn truncated(ui: &mut egui::Ui, text: impl Into<String>, color: Color32, strong: bool) {
-    let text = text.into();
+pub fn truncated(ui: &mut egui::Ui, text: String, color: Color32) {
     let rich = RichText::new(text.as_str()).color(color);
-    let rich = if strong { rich.strong() } else { rich };
     ui.add(egui::Label::new(rich).truncate()).on_hover_text(text);
 }
 

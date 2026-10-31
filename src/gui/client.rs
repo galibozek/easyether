@@ -212,40 +212,36 @@ impl ClientTab {
         let p = widgets::pal(ui);
         widgets::status_bar(ui, |ui| {
             // Details the tab does not show: where we are connected, for how long, how
-            // stable it has been, when the next attempt comes, and why it ended.
+            // stable it has been, when the next attempt comes, and why it ended. One color for
+            // the message, the warning color for problems.
             widgets::muted(ui, "Status");
-            if let Some(since) = link.since {
-                widgets::truncated(ui, server, p.text, true);
-                widgets::muted(
-                    ui,
-                    format!("· connected {}", crate::log::format_uptime(since.elapsed())),
-                );
-                if link.reconnects > 0 {
-                    let text = match link.reconnects {
-                        1 => "· 1 reconnect".to_string(),
-                        n => format!("· {n} reconnects"),
-                    };
-                    widgets::muted(ui, text)
-                        .on_hover_text("Connection losses since Connect, each followed by an automatic reconnect.");
+            let (text, color) = if let Some(since) = link.since {
+                let mut text = format!("{server} · connected {}", crate::log::format_uptime(since.elapsed()));
+                match link.reconnects {
+                    0 => {}
+                    1 => text.push_str(" · 1 reconnect"),
+                    n => text.push_str(&format!(" · {n} reconnects")),
                 }
+                (text, p.text)
             } else if let (true, Some((reason, next))) = (running, retry(status)) {
                 let text = if reason.starts_with("Server unreachable") {
                     format!("{server} unreachable · {next}")
                 } else {
                     format!("connection lost · {next}")
                 };
-                widgets::truncated(ui, text, p.warn, false);
+                (text, p.warn)
             } else if running && status.starts_with("Disconnecting") {
-                widgets::truncated(ui, "disconnecting…", p.muted, false);
+                ("disconnecting…".into(), p.text)
             } else if running {
-                widgets::truncated(ui, format!("connecting to {server}…"), p.muted, false);
+                (format!("connecting to {server}…"), p.text)
             } else if let Some(reason) = status.strip_prefix("Disconnected - error: ") {
-                widgets::truncated(ui, format!("{reason} · see log"), p.warn, false);
+                (format!("{reason} · see log"), p.warn)
             } else if status.starts_with("Disconnected - ") {
-                widgets::truncated(ui, "ended by the server", p.warn, false);
+                ("ended by the server".into(), p.warn)
             } else {
-                widgets::truncated(ui, "not connected", p.muted, false);
-            }
+                ("not connected".into(), p.text)
+            };
+            widgets::truncated(ui, text, color);
         });
 
         self.worker.log.ui(ui, "Client Log");
