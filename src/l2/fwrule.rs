@@ -8,7 +8,7 @@
 const TCP: &str = "6";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Action {
+enum Action {
     Allow,
     Block,
     Other,
@@ -49,7 +49,7 @@ impl Rule {
         self.get("Name").unwrap_or("")
     }
 
-    pub fn action(&self) -> Action {
+    fn action(&self) -> Action {
         match self.get("Action") {
             Some(a) if a.eq_ignore_ascii_case("Allow") => Action::Allow,
             Some(a) if a.eq_ignore_ascii_case("Block") => Action::Block,
@@ -57,22 +57,22 @@ impl Rule {
         }
     }
 
-    pub fn is_active(&self) -> bool {
+    fn is_active(&self) -> bool {
         self.get("Active").is_some_and(|a| a.eq_ignore_ascii_case("TRUE"))
     }
 
-    pub fn is_inbound(&self) -> bool {
+    fn is_inbound(&self) -> bool {
         self.get("Dir").is_some_and(|d| d.eq_ignore_ascii_case("In"))
     }
 
     /// No protocol means every protocol.
-    pub fn covers_tcp(&self) -> bool {
+    fn covers_tcp(&self) -> bool {
         self.get("Protocol").is_none_or(|p| p == TCP)
     }
 
     /// No local port means every port; values are numbers, ranges `a-b` or keywords (RPC...),
     /// which never match an ordinary port.
-    pub fn covers_port(&self, port: u16) -> bool {
+    fn covers_port(&self, port: u16) -> bool {
         let mut ports = self.all("LPort").peekable();
         if ports.peek().is_none() {
             return true;
@@ -93,8 +93,10 @@ impl Rule {
     }
 
     /// No program means every program. `env` looks up environment variables (`%ProgramFiles%`).
-    pub fn covers_app(&self, exe: &str, env: impl Fn(&str) -> Option<String>) -> bool {
-        self.app().is_none_or(|app| same_path(&expand_env(app, env), exe))
+    /// A rule limited to a service or to a Store app package never applies to a desktop program.
+    fn covers_app(&self, exe: &str, env: impl Fn(&str) -> Option<String>) -> bool {
+        let other_kind = ["Svc", "AppPkgId", "PFN"].iter().any(|k| self.get(k).is_some());
+        !other_kind && self.app().is_none_or(|app| same_path(&expand_env(app, env), exe))
     }
 
     /// Profiles the rule applies to; empty means all of them.
@@ -122,7 +124,7 @@ impl Rule {
 }
 
 /// Replaces `%NAME%` with the variable's value (unknown ones are left as they are).
-pub fn expand_env(s: &str, env: impl Fn(&str) -> Option<String>) -> String {
+fn expand_env(s: &str, env: impl Fn(&str) -> Option<String>) -> String {
     let mut out = String::new();
     let mut rest = s;
     while let Some(start) = rest.find('%') {
@@ -195,6 +197,14 @@ mod tests {
         assert!(!off.blocks(5555, EXE, env));
         let out = Rule::parse("v2.30|Action=Block|Active=TRUE|Dir=Out|Protocol=6|Name=Out|").unwrap();
         assert!(!out.blocks(5555, EXE, env));
+    }
+
+    #[test]
+    fn service_and_store_app_rules_do_not_apply_to_us() {
+        for limit in ["Svc=Dnscache", "AppPkgId=S-1-15-2-1", "PFN=Microsoft.App_8wekyb3d8bbwe"] {
+            let r = Rule::parse(&format!("v2.31|Action=Block|Active=TRUE|Dir=In|{limit}|Name=x|")).unwrap();
+            assert!(!r.blocks(5555, EXE, env), "{limit}");
+        }
     }
 
     #[test]

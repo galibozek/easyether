@@ -2,8 +2,8 @@
 //! connections. We run as administrator, so we add a rule for our own executable, then check
 //! the firewall's configuration for the cases where that rule exists but does not help: a block
 //! rule (block wins over allow), a profile set to block all incoming connections, or group
-//! policy ignoring local rules. Block rules for exactly our program are removed: they are what
-//! Windows leaves behind when "Cancel" was clicked in its firewall prompt.
+//! policy ignoring local rules. The block rule Windows leaves behind when "Cancel" was clicked
+//! in its firewall prompt for our program is removed; other block rules are only reported.
 
 use std::io;
 use std::path::Path;
@@ -136,11 +136,17 @@ fn check(port: u16, exe: &Path, log: &Logger) {
         ));
     }
 
-    // Block rules win over allow rules. Ours for exactly this program (left by a cancelled
-    // firewall prompt) are removed; anything else is reported.
+    // Block rules win over allow rules. The ones a cancelled firewall prompt leaves for exactly
+    // this program are removed: the prompt names them after the file ("easyether.exe", the
+    // program has no version resource). Anything else, a rule someone made on purpose
+    // included, is only reported.
+    let file_name = exe
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     for r in local.iter().filter(|r| r.blocks(port, &exe_str, env)) {
-        let ours = r.app().is_some() && r.name() != RULE && !r.name().is_empty() && !r.name().starts_with('@');
-        if ours && remove_block_rule(r.name(), exe).is_ok() {
+        let from_prompt = r.app().is_some() && !file_name.is_empty() && r.name().eq_ignore_ascii_case(&file_name);
+        if from_prompt && remove_block_rule(r.name(), exe).is_ok() {
             log.info(format!(
                 "Windows Firewall: removed inbound rule '{}' that blocked EasyEther (usually left by a cancelled firewall prompt).",
                 r.name()
