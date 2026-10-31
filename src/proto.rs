@@ -69,6 +69,10 @@ pub enum Msg {
     Pong { token: u64, hold_us: u32 },
 }
 
+/// Encoded sizes of a ping and a pong, length prefix included (they are not throughput).
+pub const PING_LEN: usize = 4 + 10;
+pub const PONG_LEN: usize = 4 + 14;
+
 /// The "Close" message.
 pub fn encode_close(out: &mut Vec<u8>) {
     out.clear();
@@ -367,8 +371,10 @@ mod tests {
         let mut out = Vec::new();
         let mut dec = BatchDecoder::default();
         encode_ping(0x0102_0304_0506_0708, &mut out);
+        assert_eq!(out.len(), PING_LEN);
         dec.push(&out);
         encode_pong(42, 1_500, &mut out);
+        assert_eq!(out.len(), PONG_LEN);
         dec.push(&out);
         let mut got = Vec::new();
         assert_eq!(dec.next(&mut got).unwrap(), Some(Msg::Ping(0x0102_0304_0506_0708)));
