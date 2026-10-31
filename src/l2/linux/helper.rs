@@ -53,6 +53,14 @@ fn spawn(log: &Logger) -> io::Result<Helper> {
         ));
     };
     let exe = std::env::current_exe()?;
+    // Replaced on disk while running (an update, a rebuild): the kernel reports the old path
+    // with " (deleted)", pkexec cannot find it and exits at once with the same code as a
+    // refused password, without any dialog.
+    if exe.to_string_lossy().ends_with(" (deleted)") {
+        return Err(io::Error::other(
+            "EasyEther's program file was replaced while it was running (an update?). Close EasyEther and start it again.",
+        ));
+    }
     let (ours, theirs) = UnixStream::pair()?;
     log.info("Asking for administrator rights (polkit) to open network adapters...");
     let child = Command::new(pkexec)
