@@ -175,10 +175,14 @@ pub fn paint_badge(painter: &egui::Painter, right: f32, y: f32, color: Color32, 
     let dot_w = dot.size().x;
     text_right(x, dot);
     x -= dot_w + 6.0;
+    // Each arrow sits right before its number; the slot's spare room goes to the left of the
+    // arrow, so the groups stay put while the arrow follows the number.
+    let (tx_w, rx_w) = (tx.size().x, rx.size().x);
     text_right(x, tx);
-    x = paint_arrow(painter, x - slots[1] - 3.0, y, color, true) - 7.0;
+    paint_arrow(painter, x - tx_w - 3.0, y, color, true);
+    x -= slots[1] + 3.0 + 7.0 + 10.0;
     text_right(x, rx);
-    paint_arrow(painter, x - slots[2] - 3.0, y, color, false);
+    paint_arrow(painter, x - rx_w - 3.0, y, color, false);
 }
 
 fn paint_sun(painter: &egui::Painter, c: egui::Pos2, color: Color32) {
