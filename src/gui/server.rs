@@ -268,13 +268,16 @@ impl ServerTab {
                         if !self.addresses.is_empty() {
                             ui.add_space(4.0);
                             widgets::muted(ui, "All addresses of this computer:");
-                            egui::Grid::new("my_addresses").num_columns(2).show(ui, |ui| {
-                                for (name, ip) in &self.addresses {
-                                    ui.label(format!("{ip}:{port}"));
-                                    widgets::muted(ui, name);
-                                    ui.end_row();
-                                }
-                            });
+                            egui::Grid::new("my_addresses")
+                                .num_columns(2)
+                                .spacing([12.0, 2.0])
+                                .show(ui, |ui| {
+                                    for (name, ip) in &self.addresses {
+                                        ui.label(format!("{ip}:{port}"));
+                                        widgets::muted(ui, name);
+                                        ui.end_row();
+                                    }
+                                });
                         }
                     });
                 if resp.clicked() {
