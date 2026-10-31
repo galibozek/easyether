@@ -186,14 +186,19 @@ impl ServerTab {
                     .map(|a| format!("{}   {}", a.name, a.detail))
                     .unwrap_or_else(|| "(no adapter)".into());
                 ui.add_enabled_ui(!running, |ui| {
+                    // The list shows the full names; the chosen one is cut to the box's width
+                    // so a long name (Windows) does not push the other fields out.
                     egui::ComboBox::from_id_salt("adapter")
                         .width(combo_width)
-                        .selected_text(current)
+                        .truncate()
+                        .selected_text(&current)
                         .show_ui(ui, |ui| {
                             for (i, a) in self.adapters.iter().enumerate() {
                                 ui.selectable_value(&mut self.selected, Some(i), format!("{}   {}", a.name, a.detail));
                             }
-                        });
+                        })
+                        .response
+                        .on_hover_text(&current);
                 });
             });
             // Refresh belongs to the adapter list; a gap separates it from port + Share/Stop.
