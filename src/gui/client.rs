@@ -205,7 +205,8 @@ impl ClientTab {
             ui.set_min_height(widgets::SETTINGS_ROW_HEIGHT);
             widgets::caption(ui, "IPv4");
             ui.label(RichText::new(net).strong());
-            widgets::muted(ui, format!("on {}", l2::client_adapter_name()));
+            widgets::muted(ui, "on");
+            ui.label(RichText::new(l2::client_adapter_name()).color(widgets::pal(ui).text));
             if widgets::small_button(ui, !running, "Network settings").clicked() {
                 self.net_dialog = Some(NetDialog {
                     static_ip: settings.static_ipv4_enabled,
