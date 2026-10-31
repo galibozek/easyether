@@ -41,9 +41,9 @@ const DARK: Palette = Palette {
     error: Color32::from_rgb(0xF8, 0x71, 0x71),
 };
 
+/// State shown by a tab badge (a side that is off shows no badge at all).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Activity {
-    Off,
     Pending,
     On,
 }
@@ -51,7 +51,6 @@ pub enum Activity {
 impl Activity {
     pub fn color(self, p: &Palette) -> Color32 {
         match self {
-            Activity::Off => p.muted,
             Activity::Pending => p.warn,
             Activity::On => Color32::from_rgb(0x22, 0xC5, 0x5E),
         }
@@ -150,7 +149,6 @@ pub fn paint_badge(painter: &egui::Painter, right: f32, y: f32, color: Color32, 
             .text(egui::pos2(x, y), egui::Align2::RIGHT_CENTER, s, font.clone(), color)
             .left()
     };
-    let (state, activity) = (badge.state, badge.activity);
     let mut x = right;
     if let Some(rtt) = badge.rtt {
         x = text_right(x, &crate::log::format_rtt(rtt)) - 6.0;
@@ -163,8 +161,8 @@ pub fn paint_badge(painter: &egui::Painter, right: f32, y: f32, color: Color32, 
         x = paint_arrow(painter, x, y, color, false) - 6.0;
         x = text_right(x, "·") - 6.0;
     }
-    let left = text_right(x, state);
-    paint_dot(painter, egui::pos2(left - 9.0, y), color, activity != Activity::Off);
+    let left = text_right(x, badge.state);
+    paint_dot(painter, egui::pos2(left - 9.0, y), color, true);
 }
 
 /// Status dot drawn with shapes (independent of emoji fonts): filled when active, ring when off.

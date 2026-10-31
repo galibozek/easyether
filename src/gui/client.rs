@@ -41,15 +41,15 @@ impl ClientTab {
         self.worker.is_running()
     }
 
-    /// Short state for the tab badge.
-    pub fn badge(&self) -> widgets::Badge {
+    /// Short state for the tab badge; none while off.
+    pub fn badge(&self) -> Option<widgets::Badge> {
         use widgets::{Activity, Badge};
-        if !self.is_running() {
+        Some(if !self.is_running() {
             // Ended by the server or an error (not by the user): draw attention.
             if self.worker.status.starts_with("Disconnected -") {
                 Badge::new("Disconnected", Activity::Pending)
             } else {
-                Badge::new("Off", Activity::Off)
+                return None;
             }
         } else if self.worker.status.starts_with("Connected") {
             Badge::new("Connected", Activity::On).traffic(self.worker.traffic, self.worker.rtt)
@@ -61,7 +61,7 @@ impl ClientTab {
             Badge::new("Disconnecting…", Activity::Pending)
         } else {
             Badge::new("Connecting…", Activity::Pending)
-        }
+        })
     }
 
     pub fn poll(&mut self) {
@@ -139,7 +139,8 @@ impl ClientTab {
         ui.add_space(4.0);
 
         ui.horizontal(|ui| {
-            let host_width = (ui.available_width() - 540.0).max(180.0);
+            // Port, Secure, password, Connect/Disconnect (104) and spacing.
+            let host_width = (ui.available_width() - 468.0).max(180.0);
             ui.vertical(|ui| {
                 widgets::caption(ui, "Server address");
                 ui.add_enabled(
@@ -177,19 +178,17 @@ impl ClientTab {
                     self.connect(settings);
                 }
             });
+            // One button that toggles: Connect while off, Disconnect while running.
             ui.vertical(|ui| {
                 widgets::caption(ui, " ");
-                ui.horizontal(|ui| {
-                    if ui.add_enabled(!running, widgets::primary_button("Connect")).clicked() {
-                        self.connect(settings);
-                    }
-                    if ui
-                        .add_enabled(running, widgets::secondary_button("Disconnect"))
-                        .clicked()
-                    {
+                let size = egui::vec2(104.0, 32.0);
+                if running {
+                    if ui.add(widgets::secondary_button("Disconnect").min_size(size)).clicked() {
                         *confirm = Some(Confirm::Disconnect);
                     }
-                });
+                } else if ui.add(widgets::primary_button("Connect").min_size(size)).clicked() {
+                    self.connect(settings);
+                }
             });
         });
 

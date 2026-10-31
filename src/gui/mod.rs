@@ -195,8 +195,9 @@ impl App {
             .inner_margin(egui::Margin::same(4))
             .show(ui, |ui| {
                 let badges = [self.server.badge(), self.client.badge()];
-                // When exactly one side runs, its tab takes the room (throughput and latency fit)
-                // and the other shrinks to its name, still clickable. Otherwise half each.
+                // Server and client exclude each other: while one runs, its tab takes the room
+                // (throughput and latency fit) and the other shrinks to its greyed-out name and
+                // cannot be opened. Otherwise half each.
                 let running = [self.server.is_running(), self.client.is_running()];
                 let gap = ui.spacing().item_spacing.x;
                 let total = ui.available_width();
@@ -209,40 +210,58 @@ impl App {
                 ui.horizontal(|ui| {
                     for (col, tab, label) in [(0, Tab::Server, "Server"), (1, Tab::Client, "Client")] {
                         let selected = self.tab == tab;
-                        let narrow = widths[col] <= compact;
+                        let locked = running[1 - col] && !selected;
                         // Drawn by hand (no Button widget): hovering only changes the background,
                         // so the text and badge never move.
-                        let (rect, resp) = ui.allocate_exact_size(Vec2::new(widths[col], 34.0), egui::Sense::click());
+                        let sense = if locked {
+                            egui::Sense::hover()
+                        } else {
+                            egui::Sense::click()
+                        };
+                        let (rect, resp) = ui.allocate_exact_size(Vec2::new(widths[col], 34.0), sense);
+                        let resp = if locked {
+                            resp.on_hover_text(if col == 0 {
+                                "Disconnect the client first."
+                            } else {
+                                "Stop sharing first."
+                            })
+                        } else {
+                            resp
+                        };
                         let bg = if selected {
                             ACCENT
-                        } else if resp.hovered() {
+                        } else if resp.hovered() && !locked {
                             p.stroke
                         } else {
                             Color32::TRANSPARENT
                         };
                         let painter = ui.painter();
                         painter.rect_filled(rect, 8.0, bg);
+                        let text_color = if selected {
+                            Color32::WHITE
+                        } else if locked {
+                            p.muted.gamma_multiply(0.5)
+                        } else {
+                            p.muted
+                        };
                         painter.text(
                             egui::pos2(rect.left() + 14.0, rect.center().y),
                             egui::Align2::LEFT_CENTER,
                             label,
                             egui::FontId::proportional(15.0),
-                            if selected { Color32::WHITE } else { p.muted },
+                            text_color,
                         );
                         // State badge on the right side of the tab: "● Connected · ↓ rx ↑ tx · rtt",
-                        // "○ Off", ... A narrow tab shows its name only.
-                        let badge = &badges[col];
-                        let color = if selected && badge.activity == widgets::Activity::Off {
-                            Color32::from_white_alpha(200)
-                        } else if selected {
-                            Color32::WHITE
-                        } else {
-                            badge.activity.color(p)
-                        };
-                        if !narrow {
+                        // nothing while off. A narrow tab shows its name only.
+                        if let Some(badge) = badges[col].as_ref().filter(|_| widths[col] > compact) {
+                            let color = if selected {
+                                Color32::WHITE
+                            } else {
+                                badge.activity.color(p)
+                            };
                             widgets::paint_badge(painter, rect.right() - 12.0, rect.center().y, color, badge);
                         }
-                        if resp.clicked() && !selected {
+                        if resp.clicked() && !selected && !locked {
                             self.tab = tab;
                             self.settings.last_tab = label.to_string();
                             self.settings.save();
