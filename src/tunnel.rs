@@ -34,6 +34,11 @@ const STALE_SESSION: Duration = LINK_TIMEOUT;
 /// meanwhile are treated as stale and dropped (higher layers have retransmitted by then).
 /// Shorter blips are simply delivered late, which is what TCP inside the tunnel prefers.
 const STALL: Duration = Duration::from_secs(2);
+/// Linux: at most this much not-yet-sent data waits in the tunnel socket (TCP_NOTSENT_LOWAT).
+/// Bounds the queue in front of diagnostic frames under bulk traffic; data in flight is not
+/// limited, so throughput is not either.
+#[cfg(target_os = "linux")]
+const NOTSENT_LOWAT: i32 = 128 << 10;
 /// Reconnect delays in seconds: first retry at once, then backing off.
 const RECONNECT_DELAYS: [u64; 5] = [0, 1, 2, 5, 10];
 /// Hard limit for the whole handshake (TLS + password), against slow or stalled clients.
@@ -125,9 +130,27 @@ fn configure_socket(tcp: &TcpStream) -> io::Result<()> {
     tcp.set_write_timeout(Some(peer_timeout))?;
     let s = socket2::SockRef::from(tcp);
     // No SO_RCVBUF/SO_SNDBUF: setting them disables the OS autotuning (and Linux caps them at
-    // rmem_max/wmem_max, 208 KiB by default). Autotuned buffers follow the link's
-    // bandwidth-delay product, so throughput is not capped per round trip and the queue stays
-    // short on slow links. Stall detection still works: a stalled buffer blocks writes.
+    // rmem_max/wmem_max, 208 KiB by default), which capped throughput per round trip. Autotuned
+    // buffers can grow large under sustained bulk traffic on a buffered path (LTE, VPN), and
+    // then more queues in front of diagnostic frames and more arrives late after a stall
+    // (stall detection only fires once a write blocks). On Linux TCP_NOTSENT_LOWAT keeps the
+    // not-yet-sent part short without limiting throughput; Windows sizes its send buffer from
+    // the measured bandwidth-delay product.
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        let lowat: libc::c_int = NOTSENT_LOWAT;
+        // SAFETY: valid socket descriptor and a pointer to a live c_int of the given length.
+        unsafe {
+            libc::setsockopt(
+                tcp.as_raw_fd(),
+                libc::IPPROTO_TCP,
+                libc::TCP_NOTSENT_LOWAT,
+                &lowat as *const libc::c_int as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+        }
+    }
     let ka = socket2::TcpKeepalive::new()
         .with_time(Duration::from_secs(10))
         .with_interval(Duration::from_secs(5));
@@ -1177,6 +1200,30 @@ mod tests {
         client_stop.store(true, Ordering::SeqCst);
         assert!(matches!(client.join().unwrap(), End::Stopped));
         assert!(matches!(server.join().unwrap(), End::PeerClosed));
+    }
+
+    /// The tunnel socket keeps OS-tuned buffers and, on Linux, a bounded not-yet-sent queue.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn tunnel_socket_bounds_unsent_data() {
+        use std::os::fd::AsRawFd;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let tcp = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        configure_socket(&tcp).unwrap();
+        let mut value: libc::c_int = 0;
+        let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        // SAFETY: valid descriptor; value and len are live and sized for the option.
+        let r = unsafe {
+            libc::getsockopt(
+                tcp.as_raw_fd(),
+                libc::IPPROTO_TCP,
+                libc::TCP_NOTSENT_LOWAT,
+                &mut value as *mut libc::c_int as *mut libc::c_void,
+                &mut len,
+            )
+        };
+        assert_eq!(r, 0);
+        assert_eq!(value, NOTSENT_LOWAT);
     }
 
     #[test]
