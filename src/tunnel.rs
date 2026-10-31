@@ -255,6 +255,8 @@ struct Counters {
 
 /// How often the session's state goes to the log, so a slowdown can be traced afterwards.
 const LINK_REPORT: Duration = Duration::from_secs(30);
+/// Whether that report is written (`--link-log`).
+pub static LINK_LOG: AtomicBool = AtomicBool::new(false);
 
 /// The round trip shown: the last measured one, or, once our latest ping has waited a second or
 /// more, that wait (a stalled link shows a growing latency, not an old one). A shorter wait is
@@ -435,10 +437,10 @@ fn run_session(
                 }
                 (last_report, prev_tx, prev_rx) = (Instant::now(), tx_b, rx_b);
 
-                // Every LINK_REPORT, what went through and how the link behaved, so a slowdown
-                // can be located afterwards: frames not coming from the adapter, writes stuck
-                // on TCP, or the peer not answering.
-                if link_at.elapsed() >= LINK_REPORT {
+                // With --link-log, every LINK_REPORT: what went through and how the link
+                // behaved, so a slowdown can be located afterwards: frames not coming from the
+                // adapter, writes stuck on TCP, or the peer not answering.
+                if LINK_LOG.load(Ordering::Relaxed) && link_at.elapsed() >= LINK_REPORT {
                     let now = [
                         counters.to_peer.load(Ordering::Relaxed),
                         counters.from_peer.load(Ordering::Relaxed),
