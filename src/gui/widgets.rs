@@ -90,7 +90,7 @@ pub fn style(ctx: &egui::Context) {
 }
 
 /// A running side's tab badge: download, upload and latency in the state's color, each
-/// "---" until known (waiting for a client, connecting).
+/// "—" until known (waiting for a client, connecting).
 pub struct Badge {
     pub activity: Activity,
     pub traffic: Option<(u64, u64)>,
@@ -141,14 +141,14 @@ fn paint_arrow(painter: &egui::Painter, right: f32, y: f32, color: Color32, up: 
 }
 
 /// Tab badge, right-aligned at (`right`, `y`): `↓ rx ↑ tx · rtt` in the state's color, with
-/// "--- B/s" / "--- ms" for what is not known yet. `id` keeps the slot widths; forget them with [`reset_badge`].
+/// "— B/s" / "— ms" for what is not known yet. `id` keeps the slot widths; forget them with [`reset_badge`].
 pub fn paint_badge(painter: &egui::Painter, id: egui::Id, right: f32, y: f32, color: Color32, badge: &Badge) {
     use crate::log::{format_rate, format_rtt};
     let font = egui::FontId::proportional(12.5);
     // Not known yet: the smallest unit, so the badge reads the same as with numbers.
-    let rate = |v: Option<u64>| v.map_or_else(|| "--- B/s".to_string(), format_rate);
+    let rate = |v: Option<u64>| v.map_or_else(|| "— B/s".to_string(), format_rate);
     let texts = [
-        badge.rtt.map_or_else(|| "--- ms".to_string(), format_rtt),
+        badge.rtt.map_or_else(|| "— ms".to_string(), format_rtt),
         rate(badge.traffic.map(|t| t.1)),
         rate(badge.traffic.map(|t| t.0)),
     ];
