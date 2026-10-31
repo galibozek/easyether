@@ -402,9 +402,11 @@ fn run_session(
                     counters.rx_bytes.load(Ordering::Relaxed),
                 );
                 let secs = elapsed.as_secs_f64();
+                // Saturating: a ping's bytes are taken off the count after it was read, which can
+                // fall just after the previous snapshot.
                 let rates = (
-                    ((rx_b - prev_rx) as f64 / secs) as u64,
-                    ((tx_b - prev_tx) as f64 / secs) as u64,
+                    (rx_b.saturating_sub(prev_rx) as f64 / secs) as u64,
+                    (tx_b.saturating_sub(prev_tx) as f64 / secs) as u64,
                 );
                 // The token of an unanswered ping is when it was sent.
                 let token = counters.last_ping.load(Ordering::Relaxed);
