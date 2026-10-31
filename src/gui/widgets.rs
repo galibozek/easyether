@@ -168,15 +168,15 @@ pub fn paint_badge(painter: &egui::Painter, right: f32, y: f32, color: Color32, 
     let text_right = |x: f32, g: std::sync::Arc<egui::Galley>| {
         painter.galley(egui::pos2(x - g.size().x, y - g.size().y / 2.0), g, color);
     };
+    // Each mark (dot, arrows) sits right before its number; a slot's spare room goes to the left
+    // of the mark, so the groups stay put while the mark follows the number.
     let mut x = right;
+    let rtt_w = rtt.size().x;
     text_right(x, rtt);
-    x -= slots[0] + 6.0;
     let dot = painter.layout_no_wrap("·".into(), font.clone(), color);
     let dot_w = dot.size().x;
-    text_right(x, dot);
-    x -= dot_w + 6.0;
-    // Each arrow sits right before its number; the slot's spare room goes to the left of the
-    // arrow, so the groups stay put while the arrow follows the number.
+    text_right(x - rtt_w - 4.0, dot);
+    x -= slots[0] + 4.0 + dot_w + 10.0;
     let (tx_w, rx_w) = (tx.size().x, rx.size().x);
     text_right(x, tx);
     paint_arrow(painter, x - tx_w - 3.0, y, color, true);
