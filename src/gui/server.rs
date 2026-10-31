@@ -84,19 +84,20 @@ impl ServerTab {
         self.worker.is_running()
     }
 
-    /// Short state for the tab badge.
-    pub fn badge(&self) -> widgets::Badge {
-        if !self.is_running() {
+    /// Short state for the tab badge; none while off.
+    pub fn badge(&self) -> Option<widgets::Badge> {
+        use widgets::{Activity, Badge};
+        Some(if !self.is_running() {
             if self.worker.status.starts_with("Error") {
-                widgets::Badge::new("Error", widgets::Activity::Pending)
+                Badge::new("Error", Activity::Pending)
             } else {
-                widgets::Badge::new("Off", widgets::Activity::Off)
+                return None;
             }
         } else if self.worker.status.contains("client connected") {
-            widgets::Badge::new("Client connected", widgets::Activity::On).traffic(self.worker.traffic, self.worker.rtt)
+            Badge::new("Client connected", Activity::On).traffic(self.worker.traffic, self.worker.rtt)
         } else {
-            widgets::Badge::new("Active · waiting for a client", widgets::Activity::On)
-        }
+            Badge::new("Active · waiting for a client", Activity::On)
+        })
     }
 
     pub fn poll(&mut self) {
@@ -166,8 +167,8 @@ impl ServerTab {
         self.drivers_ui(ui);
 
         ui.horizontal(|ui| {
-            // Refresh (84) + gap (16) + port (70) + Share/Stop (2 x 84) + spacing.
-            let combo_width = (ui.available_width() - 430.0).max(160.0);
+            // Refresh (84) + gap (16) + port (70) + Share/Stop (96) + spacing.
+            let combo_width = (ui.available_width() - 350.0).max(160.0);
             ui.vertical(|ui| {
                 widgets::caption(ui, "Network adapter");
                 let current = self
@@ -198,16 +199,17 @@ impl ServerTab {
                 widgets::caption(ui, "Port");
                 ui.add_enabled(!running, egui::TextEdit::singleline(&mut self.port).desired_width(70.0));
             });
+            // One button that toggles: Share while off, Stop while sharing (same place and width).
             ui.vertical(|ui| {
                 widgets::caption(ui, " ");
-                ui.horizontal(|ui| {
-                    if ui.add_enabled(!running, widgets::primary_button("Share")).clicked() {
-                        self.start(settings);
-                    }
-                    if ui.add_enabled(running, widgets::secondary_button("Stop")).clicked() {
+                let size = egui::vec2(96.0, 32.0);
+                if running {
+                    if ui.add(widgets::secondary_button("Stop").min_size(size)).clicked() {
                         *confirm = Some(Confirm::StopServer);
                     }
-                });
+                } else if ui.add(widgets::primary_button("Share").min_size(size)).clicked() {
+                    self.start(settings);
+                }
             });
         });
 
