@@ -494,3 +494,102 @@ impl L2Port for PacketPort {
         Ok(())
     }
 }
+
+/// `recvmmsg`/`sendmmsg` behave the same on a UDP socket as on AF_PACKET (batching,
+/// MSG_TRUNC lengths, partial batches), and UDP needs no privileges, so the batch paths are
+/// exercised on a connected UDP pair over loopback. Not covered: the AF_PACKET-only parts
+/// (outgoing-frame filter, VLAN aux data) and the kernel error paths of `sendmmsg`.
+#[cfg(test)]
+mod tests {
+    use std::net::UdpSocket;
+    use std::os::fd::OwnedFd;
+
+    use super::*;
+
+    /// A port over one end of a connected UDP pair, plus the other end.
+    fn udp_port() -> (PacketPort, UdpSocket, Logger) {
+        let a = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let b = UdpSocket::bind("127.0.0.1:0").unwrap();
+        a.connect(b.local_addr().unwrap()).unwrap();
+        b.connect(a.local_addr().unwrap()).unwrap();
+        // Room for a few hundred small datagrams in the kernel queue.
+        for s in [&a, &b] {
+            socket2::SockRef::from(s).set_recv_buffer_size(4 << 20).unwrap();
+        }
+        b.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let (log, _rx) = Logger::new(None);
+        let port = PacketPort::from_fd(OwnedFd::from(a), "lo", None, &log);
+        (port, b, log)
+    }
+
+    fn frame(len: usize, fill: u8) -> Vec<u8> {
+        vec![fill; len]
+    }
+
+    #[test]
+    fn recv_batches_and_filters_sizes() {
+        let (port, peer, _log) = udp_port();
+        // Too short, two valid ones, one too long for a frame slot.
+        for f in [
+            frame(5, 1),
+            frame(MIN_FRAME, 2),
+            frame(MAX_FRAME, 3),
+            frame(MAX_FRAME + 100, 4),
+        ] {
+            peer.send(&f).unwrap();
+        }
+        let mut out = Vec::new();
+        port.recv(&mut out, Duration::from_secs(2)).unwrap();
+        assert_eq!(out, vec![frame(MIN_FRAME, 2), frame(MAX_FRAME, 3)]);
+        assert!(port.warned_oversized.load(std::sync::atomic::Ordering::Relaxed));
+        // Nothing left: a poll times out without an error.
+        out.clear();
+        port.recv(&mut out, Duration::from_millis(50)).unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn recv_caps_a_batch_at_max_and_keeps_the_rest() {
+        let (port, peer, _log) = udp_port();
+        for i in 0..(MAX_BATCH + 44) {
+            peer.send(&frame(100, i as u8)).unwrap();
+        }
+        let mut out = Vec::new();
+        port.recv(&mut out, Duration::from_secs(2)).unwrap();
+        assert_eq!(out.len(), MAX_BATCH);
+        let mut rest = Vec::new();
+        port.recv(&mut rest, Duration::from_secs(2)).unwrap();
+        assert_eq!(rest.len(), 44);
+        // Order is preserved across the two batches.
+        let all: Vec<u8> = out.iter().chain(&rest).map(|f| f[0]).collect();
+        assert_eq!(all, (0..(MAX_BATCH + 44)).map(|i| i as u8).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn send_pads_short_frames_and_keeps_order() {
+        let (port, peer, _log) = udp_port();
+        port.send(&[frame(20, 1), frame(100, 2), frame(MAX_FRAME, 3)]).unwrap();
+        let mut buf = vec![0u8; MAX_FRAME + 1];
+        let n = peer.recv(&mut buf).unwrap();
+        // Padded to the minimum Ethernet frame, zeros after the payload.
+        assert_eq!(n, MIN_ETH_FRAME);
+        assert_eq!(&buf[..20], &[1u8; 20]);
+        assert_eq!(&buf[20..n], &[0u8; MIN_ETH_FRAME - 20]);
+        let n = peer.recv(&mut buf).unwrap();
+        assert_eq!(&buf[..n], &frame(100, 2)[..]);
+        let n = peer.recv(&mut buf).unwrap();
+        assert_eq!(&buf[..n], &frame(MAX_FRAME, 3)[..]);
+    }
+
+    #[test]
+    fn send_splits_into_batches() {
+        let (port, peer, _log) = udp_port();
+        let frames: Vec<Vec<u8>> = (0..(MAX_BATCH + 10)).map(|i| frame(100, i as u8)).collect();
+        port.send(&frames).unwrap();
+        let mut buf = [0u8; 200];
+        for (i, f) in frames.iter().enumerate() {
+            let n = peer.recv(&mut buf).unwrap_or_else(|e| panic!("datagram {i}: {e}"));
+            assert_eq!(&buf[..n], &f[..]);
+        }
+    }
+}
