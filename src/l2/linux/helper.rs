@@ -6,13 +6,16 @@
 //! kept for the rest of the session, so the password is asked once.
 //!
 //! Protocol (one line per request, replies `warn <text>`* then `ok [args]` or `err <text>`):
-//!   hello
-//!   packet <ifname>            -> ok gro=<0|1|-> lro=<0|1|->   + socket fd
-//!   tap <mac 12 hex digits>    -> ok                           + tap fd
-//!   brtap <bridge> <mac>       -> ok                           + tap fd (port of the bridge)
-//!   ip <replace|del> <cidr>    -> ok
-//!   offload <ifname> <gro> <lro> -> ok
-//!   dhcp <start|stop>          -> ok                           (dhcpcd on the TAP adapter)
+//!
+//! ```text
+//! hello
+//! packet <ifname>              -> ok gro=<0|1|-> lro=<0|1|->   + socket fd
+//! tap <mac 12 hex digits>      -> ok                           + tap fd
+//! brtap <bridge> <mac>         -> ok                           + tap fd (port of the bridge)
+//! ip <replace|del> <cidr>      -> ok
+//! offload <ifname> <gro> <lro> -> ok
+//! dhcp <start|stop>            -> ok                           (dhcpcd on the TAP adapter)
+//! ```
 
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -349,14 +352,16 @@ fn send_with_fd(sock: RawFd, data: &[u8], fd: Option<RawFd>) -> io::Result<()> {
         iov_len: data.len(),
     };
     let mut cmsg = [0u8; 32];
-    // SAFETY: zeroed msghdr is valid; all pointers stay alive for the call and the cmsg
-    // buffer is large enough for one int.
+    // SAFETY: msghdr is plain old data; all-zero is a valid value.
     let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
     msg.msg_iov = &mut iov;
     msg.msg_iovlen = 1;
     if let Some(fd) = fd {
         msg.msg_control = cmsg.as_mut_ptr() as *mut libc::c_void;
+        // SAFETY: CMSG_SPACE only computes a size.
         msg.msg_controllen = unsafe { libc::CMSG_SPACE(4) } as _;
+        // SAFETY: msg_control points at `cmsg`, which is larger than CMSG_SPACE(4), so the
+        // first header and its 4-byte payload are inside it.
         unsafe {
             let c = libc::CMSG_FIRSTHDR(&msg);
             (*c).cmsg_level = libc::SOL_SOCKET;
@@ -365,6 +370,7 @@ fn send_with_fd(sock: RawFd, data: &[u8], fd: Option<RawFd>) -> io::Result<()> {
             std::ptr::write_unaligned(libc::CMSG_DATA(c) as *mut RawFd, fd);
         }
     }
+    // SAFETY: msg and every buffer it points to (iov, data, cmsg) stay alive for the call.
     let n = unsafe { libc::sendmsg(sock, &msg, 0) };
     if n < 0 {
         return Err(io::Error::last_os_error());
@@ -378,12 +384,13 @@ fn recv_with_fd(sock: RawFd, buf: &mut [u8]) -> io::Result<(usize, Option<OwnedF
         iov_len: buf.len(),
     };
     let mut cmsg = [0u8; 64];
-    // SAFETY: zeroed msghdr is valid; pointers stay alive for the call.
+    // SAFETY: msghdr is plain old data; all-zero is a valid value.
     let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
     msg.msg_iov = &mut iov;
     msg.msg_iovlen = 1;
     msg.msg_control = cmsg.as_mut_ptr() as *mut libc::c_void;
     msg.msg_controllen = cmsg.len() as _;
+    // SAFETY: msg and every buffer it points to (iov, buf, cmsg) stay alive for the call.
     let n = unsafe { libc::recvmsg(sock, &mut msg, libc::MSG_CMSG_CLOEXEC) };
     if n < 0 {
         return Err(io::Error::last_os_error());

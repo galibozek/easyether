@@ -75,6 +75,7 @@ pub fn apply(addr: Ipv4Addr, prefix: u8, log: &Logger) -> io::Result<Box<dyn Sen
 
     // SAFETY: a zeroed row is valid input for InitializeUnicastIpAddressEntry.
     let mut row: Box<MIB_UNICASTIPADDRESS_ROW> = Box::new(unsafe { std::mem::zeroed() });
+    // SAFETY: `row` is a valid, exclusively borrowed row for the call.
     unsafe { ffi::InitializeUnicastIpAddressEntry(&mut *row) };
     row.Address.si_family = AF_INET;
     row.Address.Ipv4.sin_family = AF_INET;

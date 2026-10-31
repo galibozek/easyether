@@ -48,6 +48,7 @@ pub struct Handle(pub HANDLE);
 
 // SAFETY: kernel handles may be used from any thread.
 unsafe impl Send for Handle {}
+// SAFETY: as above; the handle value is never changed after creation.
 unsafe impl Sync for Handle {}
 
 impl Drop for Handle {

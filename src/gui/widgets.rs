@@ -337,7 +337,7 @@ pub fn theme_switch(ui: &mut egui::Ui, current: &str) -> Option<&'static str> {
     chosen
 }
 
-/// "Status <text>" bar with optional extra content on the right.
+/// "Status `<text>`" bar with optional extra content on the right.
 pub fn status_bar(ui: &mut egui::Ui, status: &str, right: impl FnOnce(&mut egui::Ui)) {
     let p = pal(ui);
     egui::Frame::new()

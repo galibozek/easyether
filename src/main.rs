@@ -68,8 +68,9 @@ mod console {
     #[cfg(windows)]
     pub fn attach() -> Console {
         use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AllocConsole, AttachConsole};
-        // SAFETY: plain Win32 calls without pointers.
+        // SAFETY: plain Win32 call without pointers.
         let attached = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) } != 0;
+        // SAFETY: plain Win32 call without pointers.
         let own_window = !attached && unsafe { AllocConsole() } != 0;
         Console { own_window }
     }

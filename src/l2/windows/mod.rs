@@ -1,6 +1,6 @@
 //! Windows backend built on SoftEther's signed kernel drivers:
-//! * SeLow  – NDIS protocol driver giving raw L2 access to a physical NIC (server side)
-//! * Neo6   – virtual Ethernet adapter, instance "VPN127" (client side)
+//! * SeLow: NDIS protocol driver giving raw L2 access to a physical NIC (server side)
+//! * Neo6: virtual Ethernet adapter, instance "VPN127" (client side)
 
 mod ffi;
 pub mod firewall;
