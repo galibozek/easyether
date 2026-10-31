@@ -13,6 +13,8 @@ use crate::log::Logger;
 
 #[cfg(any(windows, test))]
 pub mod exchange;
+#[cfg(any(windows, test))]
+pub mod fwrule;
 
 #[cfg(target_os = "linux")]
 mod linux;

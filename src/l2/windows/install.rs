@@ -68,14 +68,42 @@ fn quiet_command(program: &str) -> Command {
     cmd
 }
 
+/// Console tools (netsh, pnputil) write in the OEM code page (CP852 on Polish Windows), not
+/// UTF-8; decoding as UTF-8 garbled every non-ASCII letter in their messages.
+fn decode_console(bytes: &[u8]) -> String {
+    use windows_sys::Win32::Globalization::{GetOEMCP, MultiByteToWideChar};
+    if bytes.is_empty() || bytes.len() > i32::MAX as usize {
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
+    // SAFETY: no pointers.
+    let cp = unsafe { GetOEMCP() };
+    let mut wide = vec![0u16; bytes.len()];
+    // SAFETY: both buffers are valid for the given lengths; one byte never becomes more than
+    // one UTF-16 unit in a single-byte OEM code page, and the call fails cleanly otherwise.
+    let n = unsafe {
+        MultiByteToWideChar(
+            cp,
+            0,
+            bytes.as_ptr(),
+            bytes.len() as i32,
+            wide.as_mut_ptr(),
+            wide.len() as i32,
+        )
+    };
+    if n <= 0 {
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
+    String::from_utf16_lossy(&wide[..n as usize])
+}
+
 /// Runs a system tool quietly; on failure its output becomes the error message.
 pub fn run(program: &str, args: &[&str]) -> io::Result<()> {
     let out = quiet_command(program).args(args).output()?;
     if out.status.success() {
         return Ok(());
     }
-    let mut text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    let err = String::from_utf8_lossy(&out.stderr);
+    let mut text = decode_console(&out.stdout).trim().to_string();
+    let err = decode_console(&out.stderr);
     if !err.trim().is_empty() {
         text.push(' ');
         text.push_str(err.trim());
