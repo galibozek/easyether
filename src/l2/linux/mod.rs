@@ -88,8 +88,11 @@ fn random_mac() -> [u8; 6] {
 /// Opens interface `id` each time it is called. A USB adapter plugged into another port gets a
 /// new predictable name (`enp0s20f0u3` becomes `...u4`) unless names are MAC-based (`enx...`);
 /// then the interface with the same MAC is used instead, provided exactly one has it.
+/// Not for a bridge: a bridge without a fixed MAC takes one of its ports' MAC, so after the
+/// bridge is gone (NetworkManager restart) the lookup would find that physical port and share
+/// it instead, with the host no longer reachable, and stay on it when the bridge comes back.
 pub fn server_opener(id: &str, log: &Logger) -> crate::l2::Opener {
-    let mac = mac_of(id);
+    let mac = if tap::is_bridge(id) { None } else { mac_of(id) };
     let name = std::sync::Mutex::new(id.to_string());
     let log = log.clone();
     Box::new(move || {
@@ -122,13 +125,22 @@ fn mac_of(ifname: &str) -> Option<String> {
     (!mac.is_empty() && mac != "00:00:00:00:00:00").then_some(mac)
 }
 
-/// The one Ethernet interface with this MAC; `None` when none or several have it (a bridge
-/// takes the MAC of one of its ports, and guessing wrong would share the wrong network).
+/// The one Ethernet interface with this MAC; `None` when none or several have it (VLAN and
+/// bond interfaces share their parent's MAC, and guessing wrong would share the wrong
+/// network). Bridges are never candidates: one that took the lost adapter's MAC is not the
+/// adapter.
 fn ifname_by_mac(mac: &str) -> Option<String> {
+    ifname_by_mac_in(std::path::Path::new("/sys/class/net"), mac)
+}
+
+/// `ifname_by_mac` over a sysfs-like directory (one subdirectory per interface with an
+/// `address` file, and a `bridge` subdirectory for bridges), so it can be tested.
+fn ifname_by_mac_in(sys: &std::path::Path, mac: &str) -> Option<String> {
     let mut found = None;
-    for entry in std::fs::read_dir("/sys/class/net").ok()?.flatten() {
+    for entry in std::fs::read_dir(sys).ok()?.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with("eeth") || mac_of(&name).as_deref() != Some(mac) {
+        let address = std::fs::read_to_string(entry.path().join("address")).unwrap_or_default();
+        if name.starts_with("eeth") || entry.path().join("bridge").exists() || address.trim() != mac {
             continue;
         }
         if found.is_some() {
@@ -403,5 +415,67 @@ fn permission_hint(e: io::Error) -> io::Error {
         )
     } else {
         e
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fake /sys/class/net with interfaces (name, mac, is_bridge); removed on drop.
+    struct FakeSysfs(std::path::PathBuf);
+
+    impl FakeSysfs {
+        fn new(ifaces: &[(&str, &str, bool)]) -> FakeSysfs {
+            let id: String = crate::secure::new_client_id()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            let dir = std::env::temp_dir().join(format!("easyether-sysfs-{id}"));
+            for (name, mac, bridge) in ifaces {
+                let d = dir.join(name);
+                std::fs::create_dir_all(&d).unwrap();
+                std::fs::write(d.join("address"), format!("{mac}\n")).unwrap();
+                if *bridge {
+                    std::fs::create_dir_all(d.join("bridge")).unwrap();
+                }
+            }
+            FakeSysfs(dir)
+        }
+    }
+
+    impl Drop for FakeSysfs {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    const MAC: &str = "00:e0:4c:01:02:03";
+
+    #[test]
+    fn mac_lookup_finds_a_renamed_usb_adapter() {
+        let sys = FakeSysfs::new(&[("lo", "00:00:00:00:00:00", false), ("enp0s20f0u4", MAC, false)]);
+        assert_eq!(ifname_by_mac_in(&sys.0, MAC).as_deref(), Some("enp0s20f0u4"));
+        assert_eq!(ifname_by_mac_in(&sys.0, "02:00:00:00:00:01"), None);
+    }
+
+    #[test]
+    fn mac_lookup_never_picks_a_bridge() {
+        // The shared physical adapter is gone; a bridge that had taken its MAC is not it.
+        let sys = FakeSysfs::new(&[("br0", MAC, true)]);
+        assert_eq!(ifname_by_mac_in(&sys.0, MAC), None);
+    }
+
+    #[test]
+    fn mac_lookup_refuses_to_guess() {
+        // A VLAN shares its parent's MAC: ambiguous.
+        let sys = FakeSysfs::new(&[("enp3s0", MAC, false), ("enp3s0.100", MAC, false)]);
+        assert_eq!(ifname_by_mac_in(&sys.0, MAC), None);
+    }
+
+    #[test]
+    fn mac_lookup_skips_our_own_tap_ports() {
+        let sys = FakeSysfs::new(&[("eeths0", MAC, false), ("enx00e04c010203", MAC, false)]);
+        assert_eq!(ifname_by_mac_in(&sys.0, MAC).as_deref(), Some("enx00e04c010203"));
     }
 }
