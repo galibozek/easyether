@@ -251,7 +251,7 @@ impl ServerTab {
                 );
                 let copy = widgets::small_button(ui, true, "Copy");
                 if copy.clicked() {
-                    self.copied.copy(ui.ctx(), self.password.clone(), Some(&copy));
+                    self.copied.copy(ui.ctx(), self.password.clone(), &copy);
                 }
                 let new_pw = widgets::small_button(ui, true, "New password")
                     .on_hover_text("A connected client is disconnected, since its password stops being valid.");
@@ -276,32 +276,29 @@ impl ServerTab {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let resp = ui
                     .add(egui::Label::new(RichText::new(&address).strong()).sense(egui::Sense::click()))
-                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .on_hover_ui(|ui| {
-                        if self.copied.active() {
-                            ui.label(RichText::new("Copied to clipboard").strong());
-                        } else {
-                            ui.label("Click to copy.");
-                        }
-                        if !self.addresses.is_empty() {
-                            ui.add_space(4.0);
-                            widgets::muted(ui, "All addresses of this computer:");
-                            egui::Grid::new("my_addresses")
-                                .num_columns(2)
-                                .spacing([12.0, 2.0])
-                                // Rows default to the height of a button (30 px here); text lines need less.
-                                .min_row_height(0.0)
-                                .show(ui, |ui| {
-                                    for (name, ip) in &self.addresses {
-                                        ui.label(format!("{ip}:{port}"));
-                                        widgets::muted(ui, name);
-                                        ui.end_row();
-                                    }
-                                });
-                        }
-                    });
+                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                // egui hides a tooltip on click; the "Copied" note replaces it meanwhile.
+                let resp = if self.copied.active() || self.addresses.is_empty() {
+                    resp
+                } else {
+                    resp.on_hover_ui(|ui| {
+                        widgets::muted(ui, "All addresses of this computer:");
+                        egui::Grid::new("my_addresses")
+                            .num_columns(2)
+                            .spacing([12.0, 2.0])
+                            // Rows default to the height of a button (30 px here); text lines need less.
+                            .min_row_height(0.0)
+                            .show(ui, |ui| {
+                                for (name, ip) in &self.addresses {
+                                    ui.label(format!("{ip}:{port}"));
+                                    widgets::muted(ui, name);
+                                    ui.end_row();
+                                }
+                            });
+                    })
+                };
                 if resp.clicked() {
-                    self.copied.copy(ui.ctx(), address.clone(), None);
+                    self.copied.copy(ui.ctx(), address.clone(), &resp);
                 }
                 widgets::caption(ui, "My address");
             });
