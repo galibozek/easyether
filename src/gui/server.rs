@@ -245,22 +245,38 @@ impl ServerTab {
                         self.new_password();
                     }
                 }
-                widgets::muted(ui, "Give the client your address, port and password.");
             } else {
+                // Short enough for the narrow window; the details are on hover.
                 let warn = widgets::pal(ui).warn;
                 ui.label(RichText::new("Insecure:").strong().color(warn));
-                ui.label(
-                    RichText::new("no encryption and no password - anyone who can reach this port can join.")
-                        .color(warn),
-                );
+                ui.label(RichText::new("anyone who reaches this port can join").color(warn))
+                    .on_hover_text("No encryption and no password. Use it only on a trusted LAN.");
             }
         });
 
         let address = format!("{}:{}", self.local_ip, self.port.trim());
-        widgets::status_bar(ui, &self.worker.status, |ui| {
-            ui.label(RichText::new(address).strong());
-            widgets::muted(ui, "Address");
-        });
+        let client = self.worker.handle.as_ref().and_then(|h| h.client_addr());
+        let p = widgets::pal(ui);
+        widgets::status_bar(
+            ui,
+            |ui| {
+                // Who is connected; the tab shows the state itself.
+                widgets::muted(ui, "Client");
+                match client {
+                    Some(addr) if running => widgets::truncated(ui, addr.to_string(), p.text, true),
+                    // Not on the tab: the shared adapter vanished (USB unplugged...).
+                    _ if running && self.worker.status.starts_with("Adapter unavailable") => {
+                        widgets::truncated(ui, "adapter unavailable - waiting for it to come back", p.warn, false)
+                    }
+                    _ if running => widgets::truncated(ui, "waiting…", p.muted, false),
+                    _ => widgets::truncated(ui, "-", p.muted, false),
+                }
+            },
+            |ui| {
+                ui.label(RichText::new(address).strong());
+                widgets::muted(ui, "Address");
+            },
+        );
 
         self.worker.log.ui(ui, "Server Log");
     }

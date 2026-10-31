@@ -200,10 +200,33 @@ impl ClientTab {
         } else {
             "Automatic (DHCP)".into()
         };
-        widgets::status_bar(ui, &self.worker.status, |ui| {
-            ui.label(RichText::new(net).strong());
-            widgets::muted(ui, l2::client_adapter_name());
-        });
+        let server = format!("{}:{}", self.host.trim(), self.port.trim());
+        // The tab says "Reconnecting…"; the countdown and attempt number are only here.
+        let retry = self
+            .worker
+            .status
+            .split_once(" - retrying")
+            .filter(|_| running)
+            .map(|(_, rest)| format!("retrying{rest}"));
+        let p = widgets::pal(ui);
+        widgets::status_bar(
+            ui,
+            |ui| {
+                widgets::muted(ui, "Server");
+                if self.host.trim().is_empty() {
+                    widgets::truncated(ui, "-", p.muted, false);
+                } else {
+                    widgets::truncated(ui, server, p.text, true);
+                }
+                if let Some(retry) = retry {
+                    widgets::truncated(ui, retry, p.warn, false);
+                }
+            },
+            |ui| {
+                ui.label(RichText::new(net).strong());
+                widgets::muted(ui, l2::client_adapter_name());
+            },
+        );
 
         self.worker.log.ui(ui, "Client Log");
         self.net_dialog_ui(ui.ctx(), settings);
