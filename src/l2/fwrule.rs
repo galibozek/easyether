@@ -70,10 +70,16 @@ impl Rule {
         self.get("Protocol").is_none_or(|p| p == TCP)
     }
 
-    /// No local port means every port; values are numbers, ranges `a-b` or keywords (RPC...),
-    /// which never match an ordinary port.
+    /// No local port means every port. The ports are in `LPort` and, in newer rules, in
+    /// `LPort2_10` / `LPort2_20`; values are numbers, ranges `a-b` or keywords (RPC...), which
+    /// never match an ordinary port.
     fn covers_port(&self, port: u16) -> bool {
-        let mut ports = self.all("LPort").peekable();
+        let mut ports = self
+            .fields
+            .iter()
+            .filter(|(k, _)| k.len() >= 5 && k[..5].eq_ignore_ascii_case("LPort"))
+            .map(|(_, v)| v.as_str())
+            .peekable();
         if ports.peek().is_none() {
             return true;
         }
@@ -114,9 +120,18 @@ impl Rule {
         self.action() == Action::Block && self.lets_in(port, exe, env)
     }
 
+    /// Limited to some remote addresses or interfaces: whether that covers a client cannot be
+    /// told here, and such rules ("block this host") are not about us.
+    fn is_scoped(&self) -> bool {
+        ["RA4", "RA6", "RA42", "RA62", "IF", "IFType"]
+            .iter()
+            .any(|k| self.get(k).is_some())
+    }
+
     fn lets_in(&self, port: u16, exe: &str, env: impl Fn(&str) -> Option<String>) -> bool {
         self.is_active()
             && self.is_inbound()
+            && !self.is_scoped()
             && self.covers_tcp()
             && self.covers_port(port)
             && self.covers_app(exe, env)
@@ -193,6 +208,16 @@ mod tests {
         assert!(list.blocks(5555, EXE, env));
         let keyword = Rule::parse("v2.30|Action=Block|Active=TRUE|Dir=In|Protocol=6|LPort=RPC|Name=Rpc|").unwrap();
         assert!(!keyword.blocks(5555, EXE, env));
+        // Newer rules keep keywords and ranges in LPort2_10: still a port limit, not "any port".
+        let keyword2 = Rule::parse("v2.10|Action=Block|Active=TRUE|Dir=In|Protocol=6|LPort2_10=RPC|Name=Rpc|").unwrap();
+        assert!(!keyword2.blocks(5555, EXE, env));
+        let range2 = Rule::parse("v2.10|Action=Block|Active=TRUE|Dir=In|LPort2_10=5000-6000|Name=R|").unwrap();
+        assert!(range2.blocks(5555, EXE, env));
+        // Limited to a remote host or an interface: not about our clients.
+        let host = Rule::parse("v2.31|Action=Block|Active=TRUE|Dir=In|RA4=203.0.113.7|Name=Bad host|").unwrap();
+        assert!(!host.blocks(5555, EXE, env));
+        let iface = Rule::parse("v2.31|Action=Block|Active=TRUE|Dir=In|IFType=Wireless|Name=Wifi|").unwrap();
+        assert!(!iface.blocks(5555, EXE, env));
         let off = Rule::parse("v2.30|Action=Block|Active=FALSE|Dir=In|Protocol=6|Name=Off|").unwrap();
         assert!(!off.blocks(5555, EXE, env));
         let out = Rule::parse("v2.30|Action=Block|Active=TRUE|Dir=Out|Protocol=6|Name=Out|").unwrap();
