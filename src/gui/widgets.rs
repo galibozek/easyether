@@ -250,6 +250,45 @@ pub fn secondary_button(text: &str) -> egui::Button<'static> {
 /// so toggling Secure does not make the panel jump.
 pub const SETTINGS_ROW_HEIGHT: f32 = 26.0;
 
+/// "Copied to clipboard" shown under the control that copied, for two seconds.
+#[derive(Default)]
+pub struct Copied {
+    shown: Option<(std::time::Instant, Option<egui::Pos2>)>,
+}
+
+impl Copied {
+    /// Copies `text` and notes where to show the confirmation (under `from`). With `None` it is
+    /// not shown on its own: the caller has a hover text of its own and shows it there
+    /// (see [`Copied::active`]), so the two do not overlap.
+    pub fn copy(&mut self, ctx: &egui::Context, text: String, from: Option<&egui::Response>) {
+        ctx.copy_text(text);
+        let pos = from.map_or(egui::Pos2::ZERO, |r| r.rect.left_bottom() + egui::vec2(0.0, 4.0));
+        self.shown = Some((std::time::Instant::now(), from.map(|_| pos)));
+    }
+
+    /// Whether the confirmation is still due.
+    pub fn active(&self) -> bool {
+        self.shown.is_some_and(|(at, _)| at.elapsed() < Self::SHOWN_FOR)
+    }
+
+    const SHOWN_FOR: std::time::Duration = std::time::Duration::from_secs(2);
+
+    /// Draws the confirmation while it lasts; call once per frame.
+    pub fn ui(&mut self, ui: &egui::Ui) {
+        let Some((at, pos)) = self.shown else { return };
+        let Some(left) = Self::SHOWN_FOR.checked_sub(at.elapsed()) else {
+            self.shown = None;
+            return;
+        };
+        if let Some(pos) = pos {
+            egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), egui::Id::unique("copied"), pos).show(|ui| {
+                ui.label("Copied to clipboard");
+            });
+        }
+        ui.ctx().request_repaint_after(left);
+    }
+}
+
 /// A small button, like the log's Copy / Clear, for the settings rows.
 pub fn small_button(ui: &mut egui::Ui, enabled: bool, text: &str) -> egui::Response {
     ui.add_enabled(enabled, egui::Button::new(text.to_string()).small())
