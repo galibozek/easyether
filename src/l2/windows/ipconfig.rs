@@ -8,13 +8,13 @@ use windows_sys::Win32::NetworkManagement::Ndis::NET_LUID_LH;
 use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6, IpDadStatePreferred};
 
 use super::ffi::{self, MIB_IPINTERFACE_ROW, MIB_UNICASTIPADDRESS_ROW};
+use super::{CLIENT_ADAPTER_NAME, NEO_HWID, reg};
+use crate::log::Logger;
 
 /// Interface metric of the tunnel adapter: far above the automatic metrics Windows gives real
 /// adapters (5 to 55), so any route through it loses against the same route via a local
 /// network. The same value the Linux client uses for its routes.
 const TUNNEL_METRIC: u32 = 9000;
-use super::{CLIENT_ADAPTER_NAME, NEO_HWID, reg};
-use crate::log::Logger;
 
 struct AddressGuard {
     row: Box<MIB_UNICASTIPADDRESS_ROW>,
@@ -85,38 +85,59 @@ pub fn prefer_local_networks(log: &Logger) {
             return;
         }
     };
-    for family in [AF_INET, AF_INET6] {
-        // SAFETY: MIB_IPINTERFACE_ROW is plain old data; all-zero is a valid value.
-        let mut row: MIB_IPINTERFACE_ROW = unsafe { std::mem::zeroed() };
-        // SAFETY: `row` is a valid, exclusively borrowed row for the call.
-        unsafe { ffi::InitializeIpInterfaceEntry(&mut row) };
-        row.Family = family;
-        row.InterfaceLuid = luid;
-        // SAFETY: `row` names the interface by family and LUID; the call fills in the rest.
-        if unsafe { ffi::GetIpInterfaceEntry(&mut row) } != 0 {
-            continue; // This family is disabled on the adapter (e.g. IPv6 unbound).
+    // Right after the adapter was (re)enabled, its IP interfaces can appear a moment after the
+    // device does: keep trying for a few seconds. IPv6 may simply be unbound, so only IPv4
+    // gets a warning in the end.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut pending = vec![AF_INET, AF_INET6];
+    loop {
+        pending.retain(|&family| !set_tunnel_metric(luid, family, log));
+        if pending.is_empty() || std::time::Instant::now() >= deadline {
+            break;
         }
-        // SetIpInterfaceEntry rejects IPv4 rows that carry a site prefix length.
-        if family == AF_INET {
-            row.SitePrefixLength = 0;
-        }
-        row.UseAutomaticMetric = false;
-        row.Metric = TUNNEL_METRIC;
-        // SAFETY: `row` was filled by GetIpInterfaceEntry and only adjusted above.
-        let r = unsafe { ffi::SetIpInterfaceEntry(&mut row) };
-        if r != 0 {
-            log.warn(format!(
-                "Could not lower the route priority of '{CLIENT_ADAPTER_NAME}' ({}): routes from the remote network may compete with local ones.",
-                io::Error::from_raw_os_error(r as i32)
-            ));
-            continue;
-        }
-        // Separate call: older Windows versions reject the field, and the metric must not
-        // depend on it.
-        row.DisableDefaultRoutes = true;
-        // SAFETY: as above.
-        let _ = unsafe { ffi::SetIpInterfaceEntry(&mut row) };
+        std::thread::sleep(std::time::Duration::from_millis(250));
     }
+    if pending.contains(&AF_INET) {
+        log.warn(format!(
+            "'{CLIENT_ADAPTER_NAME}' has no IPv4 interface to set the route priority on: routes from the remote network may compete with local ones."
+        ));
+    }
+}
+
+/// One attempt for one address family. `false` only when the interface does not exist (yet);
+/// a failure to set it is logged and counts as done.
+fn set_tunnel_metric(luid: NET_LUID_LH, family: u16, log: &Logger) -> bool {
+    // SAFETY: MIB_IPINTERFACE_ROW is plain old data; all-zero is a valid value.
+    let mut row: MIB_IPINTERFACE_ROW = unsafe { std::mem::zeroed() };
+    // SAFETY: `row` is a valid, exclusively borrowed row for the call.
+    unsafe { ffi::InitializeIpInterfaceEntry(&mut row) };
+    row.Family = family;
+    row.InterfaceLuid = luid;
+    // SAFETY: `row` names the interface by family and LUID; the call fills in the rest.
+    if unsafe { ffi::GetIpInterfaceEntry(&mut row) } != 0 {
+        return false;
+    }
+    // SetIpInterfaceEntry rejects IPv4 rows that carry a site prefix length.
+    if family == AF_INET {
+        row.SitePrefixLength = 0;
+    }
+    row.UseAutomaticMetric = false;
+    row.Metric = TUNNEL_METRIC;
+    // SAFETY: `row` was filled by GetIpInterfaceEntry and only adjusted above.
+    let r = unsafe { ffi::SetIpInterfaceEntry(&mut row) };
+    if r != 0 {
+        log.warn(format!(
+            "Could not lower the route priority of '{CLIENT_ADAPTER_NAME}' ({}): routes from the remote network may compete with local ones.",
+            io::Error::from_raw_os_error(r as i32)
+        ));
+        return true;
+    }
+    // Separate call: older Windows versions reject the field, and the metric must not depend
+    // on it.
+    row.DisableDefaultRoutes = true;
+    // SAFETY: as above.
+    let _ = unsafe { ffi::SetIpInterfaceEntry(&mut row) };
+    true
 }
 
 /// Windows runs DHCP (with the 169.254.x.x fallback) on the adapter by itself; only report

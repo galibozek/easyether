@@ -54,7 +54,7 @@ pub trait L2Port: Send + Sync {
 }
 
 pub(crate) type Opener = Box<dyn Fn() -> io::Result<Box<dyn L2Port>> + Send + Sync>;
-type ReopenHook = Box<dyn Fn() + Send + Sync>;
+type ReopenHook = Arc<dyn Fn() + Send + Sync>;
 
 /// Watches an adapter and survives it disappearing (USB unplug, driver restart, adapter
 /// disabled): errors are logged once, frames are dropped while it is gone, and it is reopened
@@ -64,7 +64,8 @@ pub struct ResilientPort {
     open: Opener,
     log: Logger,
     state: Mutex<WatchState>,
-    /// Runs after a successful reopen, e.g. to configure the adapter's IP again.
+    /// Runs (on its own thread) after a successful reopen, e.g. to configure the adapter's IP
+    /// again.
     on_reopen: Mutex<Option<ReopenHook>>,
 }
 
@@ -95,9 +96,11 @@ impl ResilientPort {
         Ok(rp)
     }
 
-    /// Sets what to do after the adapter was reopened (it runs on the forwarding thread).
+    /// Sets what to do after the adapter was reopened. It runs on a thread of its own, so it
+    /// may wait (for the OS to finish bringing the adapter up, for a DHCP helper) without
+    /// holding up the frames that start flowing again.
     pub fn set_on_reopen(&self, hook: impl Fn() + Send + Sync + 'static) {
-        *self.on_reopen.lock().unwrap() = Some(Box::new(hook));
+        *self.on_reopen.lock().unwrap() = Some(Arc::new(hook));
     }
 
     /// The open port, reopening it (at most once a second) if it was lost.
@@ -110,8 +113,8 @@ impl ResilientPort {
                     .info(format!("Adapter '{}' is back; forwarding resumed.", self.name));
                 st.port = Some(Arc::from(p));
                 st.link = None;
-                if let Some(hook) = self.on_reopen.lock().unwrap().as_ref() {
-                    hook();
+                if let Some(hook) = self.on_reopen.lock().unwrap().clone() {
+                    std::thread::spawn(move || hook());
                 }
             }
         }
@@ -388,13 +391,16 @@ mod tests {
         port.recv(&mut out, Duration::ZERO).unwrap();
         assert!(!port.is_present());
         assert_eq!(hooks.load(Ordering::SeqCst), 0);
-        // Reopened at most once a second; the hook runs right after.
+        // Reopened at most once a second; the hook runs right after, on its own thread.
         let deadline = Instant::now() + Duration::from_secs(3);
         while !port.is_present() && Instant::now() < deadline {
             port.recv(&mut out, Duration::from_millis(100)).unwrap();
         }
         assert!(port.is_present());
         assert_eq!(opens.load(Ordering::SeqCst), 2);
+        while hooks.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
         assert_eq!(hooks.load(Ordering::SeqCst), 1);
     }
 }

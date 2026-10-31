@@ -29,10 +29,11 @@ Typical use: a car in the workshop, a diagnostic laptop at home or in another br
 - **Resilient**: keepalives, dead-link detection in 15 s, automatic reconnection with back-off,
   the virtual adapter stays up across reconnects, a live session can never be taken over by
   another client, and an adapter that disappears is reopened automatically on both sides (USB
-  re-plug, also into another USB port on Windows; driver restart; adapter disabled and enabled).
+  re-plug, also into another USB port; driver restart; adapter disabled and enabled).
 - **Never hijacks your routing**: the client adapter's routes always lose against local
-  networks (Windows: interface metric 9000, default routes ignored; Linux: no gateway, metric
-  9000), so a gateway on the remote network cannot pull your own traffic into the tunnel.
+  networks (Windows: interface metric 9000 and, where supported, default routes ignored; Linux:
+  no gateway, metric 9000), so a gateway on the remote network cannot pull your own traffic
+  into the tunnel.
 - **Live status**: throughput per direction on the tabs, detailed log with copy/clear.
 - **IPv4 and IPv6**: the server listens on both; the client accepts host names and IPv4/IPv6
   literals, including link-local with a zone (`fe80::1%eth0`, `fe80::1%12`).

@@ -85,11 +85,58 @@ fn random_mac() -> [u8; 6] {
     mac
 }
 
-/// Opens interface `id` each time it is called (an interface keeps its name across a USB
-/// re-plug: predictable names are derived from the port or the MAC).
+/// Opens interface `id` each time it is called. A USB adapter plugged into another port gets a
+/// new predictable name (`enp0s20f0u3` becomes `...u4`) unless names are MAC-based (`enx...`);
+/// then the interface with the same MAC is used instead, provided exactly one has it.
 pub fn server_opener(id: &str, log: &Logger) -> crate::l2::Opener {
-    let (id, log) = (id.to_string(), log.clone());
-    Box::new(move || open_server(&id, &log))
+    let mac = mac_of(id);
+    let name = std::sync::Mutex::new(id.to_string());
+    let log = log.clone();
+    Box::new(move || {
+        let current = name.lock().unwrap().clone();
+        let e = match open_server(&current, &log) {
+            Ok(p) => return Ok(p),
+            Err(e) => e,
+        };
+        if e.kind() != io::ErrorKind::NotFound {
+            return Err(e);
+        }
+        let Some(mac) = &mac else { return Err(e) };
+        let Some(other) = ifname_by_mac(mac).filter(|n| *n != current) else {
+            return Err(e);
+        };
+        let p = open_server(&other, &log)?;
+        log.info(format!(
+            "The shared adapter came back as '{other}' (same MAC {}); using it.",
+            mac.to_uppercase()
+        ));
+        *name.lock().unwrap() = other;
+        Ok(p)
+    })
+}
+
+/// MAC of interface `ifname` as sysfs prints it (lower-case, colon-separated).
+fn mac_of(ifname: &str) -> Option<String> {
+    let mac = std::fs::read_to_string(format!("/sys/class/net/{ifname}/address")).ok()?;
+    let mac = mac.trim().to_string();
+    (!mac.is_empty() && mac != "00:00:00:00:00:00").then_some(mac)
+}
+
+/// The one Ethernet interface with this MAC; `None` when none or several have it (a bridge
+/// takes the MAC of one of its ports, and guessing wrong would share the wrong network).
+fn ifname_by_mac(mac: &str) -> Option<String> {
+    let mut found = None;
+    for entry in std::fs::read_dir("/sys/class/net").ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with("eeth") || mac_of(&name).as_deref() != Some(mac) {
+            continue;
+        }
+        if found.is_some() {
+            return None;
+        }
+        found = Some(name);
+    }
+    found
 }
 
 fn open_server(id: &str, log: &Logger) -> io::Result<Box<dyn L2Port>> {
