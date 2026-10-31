@@ -232,7 +232,7 @@ impl ClientTab {
             // the message, the warning color for problems.
             widgets::muted(ui, "Status");
             let (text, color) = if let Some(since) = link.since {
-                let mut text = format!("{server} · connected {}", crate::log::format_uptime(since.elapsed()));
+                let mut text = format!("connected to {server} · {}", crate::log::format_uptime(since.elapsed()));
                 match link.reconnects {
                     0 => {}
                     1 => text.push_str(" · 1 reconnect"),

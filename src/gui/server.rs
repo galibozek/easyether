@@ -303,7 +303,7 @@ impl ServerTab {
             // and what is wrong. One color for the message, the warning color for problems.
             widgets::muted(ui, "Status");
             let (text, color) = match client {
-                Some((addr, since)) if running => (format!("client {addr} · connected {}", uptime(since)), p.text),
+                Some((addr, since)) if running => (format!("client connected {addr} · {}", uptime(since)), p.text),
                 _ if running && status.starts_with("Adapter unavailable") => {
                     ("adapter unplugged · waiting for it".into(), p.warn)
                 }
