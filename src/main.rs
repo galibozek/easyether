@@ -30,11 +30,17 @@ Usage:
   --insecure: plain TCP without encryption or password (must be used on both sides)
   easyether --install-drivers                Windows: install the SeLow and virtual adapter drivers
   easyether --uninstall-drivers              Windows: remove them again
+
+  --link-log (with the GUI or --cli): log the link's state every 30 s, for tracing slowdowns
 "
 );
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(i) = args.iter().position(|a| a == "--link-log") {
+        args.remove(i);
+        tunnel::LINK_LOG.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     if args.is_empty() {
         return run_gui();
     }

@@ -142,6 +142,10 @@ easyether --install-drivers | --uninstall-drivers          # Windows (also drive
 
 `EASYETHER_PASSWORD` sets the server password instead of generating one. Ctrl-C stops gracefully.
 
+`--link-log` (with the GUI, `easyether --link-log`, or with `--cli`) writes the link's state to
+the log every 30 s: frames and bytes each way, latency, the longest write to the peer and stalls.
+Useful for tracing a slowdown afterwards.
+
 ## Building from source
 
 Requires a stable Rust toolchain ([rustup](https://rustup.rs)).
