@@ -19,8 +19,8 @@ pub fn list_adapters() -> io::Result<Vec<AdapterInfo>> {
     Ok(Vec::new())
 }
 
-pub fn open_server(_id: &str, _log: &Logger) -> io::Result<Box<dyn L2Port>> {
-    Err(unsupported())
+pub fn server_opener(_id: &str, _log: &Logger) -> super::Opener {
+    Box::new(|| Err(unsupported()))
 }
 
 pub fn open_client(_mac: [u8; 6], _log: &Logger) -> io::Result<Box<dyn L2Port>> {

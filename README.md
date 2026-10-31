@@ -28,7 +28,11 @@ Typical use: a car in the workshop, a diagnostic laptop at home or in another br
   per IP. An *insecure* plain-TCP mode exists for trusted LANs.
 - **Resilient**: keepalives, dead-link detection in 15 s, automatic reconnection with back-off,
   the virtual adapter stays up across reconnects, a live session can never be taken over by
-  another client, and an adapter that disappears (USB re-plug) is reopened automatically.
+  another client, and an adapter that disappears is reopened automatically on both sides (USB
+  re-plug, also into another USB port on Windows; driver restart; adapter disabled and enabled).
+- **Never hijacks your routing**: the client adapter's routes always lose against local
+  networks (Windows: interface metric 9000, default routes ignored; Linux: no gateway, metric
+  9000), so a gateway on the remote network cannot pull your own traffic into the tunnel.
 - **Live status**: throughput per direction on the tabs, detailed log with copy/clear.
 - **IPv4 and IPv6**: the server listens on both; the client accepts host names and IPv4/IPv6
   literals, including link-local with a zone (`fe80::1%eth0`, `fe80::1%12`).
@@ -180,9 +184,9 @@ drivers/           SoftEther SeLow/Neo6 driver packages (x64, x86) + install/uni
   capabilities once: `sudo setcap cap_net_admin,cap_net_raw+ep <path to easyether>`. Automatic
   IPv4 (`dhcpcd` runs as root) still needs polkit; with capabilities alone use a static IPv4.
 - **Client gets an address but cannot reach the remote device**: the remote network may use
-  the same subnet as your LAN. The LAN always wins (on Linux the `eeth0` route gets metric
-  9000), so you never cut yourself off; use a static IPv4 in another range on both ends, or
-  disconnect the overlapping LAN while working.
+  the same subnet as your LAN. The LAN always wins (the client adapter gets metric 9000 on
+  both Windows and Linux), so you never cut yourself off; use a static IPv4 in another range on
+  both ends, or disconnect the overlapping LAN while working.
 - **Linux needs Wayland**: the Linux build has no X11 backend. On an X11 desktop run it under a
   Wayland session (or a nested compositor).
 

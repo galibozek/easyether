@@ -31,8 +31,40 @@ pub fn list_adapters() -> io::Result<Vec<AdapterInfo>> {
     selow::list_adapters()
 }
 
-pub fn open_server(id: &str, log: &Logger) -> io::Result<Box<dyn L2Port>> {
-    Ok(Box::new(selow::open(id, log)?))
+/// Opens SeLow adapter `id` (its GUID) each time it is called. A USB adapter plugged into a
+/// different port often comes back as a new device with a new GUID; then the adapter with the
+/// same MAC is used instead, provided exactly one adapter has it.
+pub fn server_opener(id: &str, log: &Logger) -> crate::l2::Opener {
+    let mac = selow::mac_of(id);
+    let guid = Mutex::new(id.to_string());
+    let log = log.clone();
+    Box::new(move || {
+        let current = guid.lock().unwrap().clone();
+        let e = match selow::open(&current, &log) {
+            Ok(p) => return Ok(Box::new(p) as Box<dyn L2Port>),
+            Err(e) => e,
+        };
+        if e.kind() != io::ErrorKind::NotFound {
+            return Err(e);
+        }
+        let Some(other) = mac
+            .and_then(selow::guid_by_mac)
+            .filter(|g| !g.eq_ignore_ascii_case(&current))
+        else {
+            return Err(e);
+        };
+        let p = selow::open(&other, &log)?;
+        log.info(format!(
+            "The shared adapter came back as a new device ({other}, same MAC {}); using it.",
+            super::format_mac(&mac.unwrap_or_default())
+        ));
+        *guid.lock().unwrap() = other;
+        Ok(Box::new(p))
+    })
+}
+
+pub fn prefer_local_networks(log: &Logger) {
+    ipconfig::prefer_local_networks(log);
 }
 
 pub fn open_client(_mac: [u8; 6], log: &Logger) -> io::Result<Box<dyn L2Port>> {

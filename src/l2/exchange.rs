@@ -111,6 +111,15 @@ impl SeLowAdapter {
     }
 }
 
+/// The one adapter with this MAC; `None` when none or several have it (a virtual switch can
+/// share a physical NIC's MAC, and guessing wrong would bridge the wrong network).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn unique_by_mac(adapters: &[SeLowAdapter], mac: [u8; 6]) -> Option<&SeLowAdapter> {
+    let mut found = adapters.iter().filter(|a| a.mac == mac);
+    let first = found.next()?;
+    found.next().is_none().then_some(first)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct SeLowAdapterList {
     pub version: u32,
@@ -207,5 +216,22 @@ mod tests {
         assert_eq!(a.mac, [0, 0x1b, 0x21, 1, 2, 3]);
         assert_eq!(a.mtu, 1500);
         assert_eq!(a.friendly_name, "Intel(R)");
+    }
+
+    #[test]
+    fn finds_an_adapter_by_mac_only_when_unambiguous() {
+        let adapter = |guid: &str, mac: [u8; 6]| SeLowAdapter {
+            adapter_id: format!("SELOW_A_{guid}"),
+            mac,
+            mtu: 1500,
+            friendly_name: String::new(),
+        };
+        let usb = [0, 0xe0, 0x4c, 1, 2, 3];
+        let list = vec![adapter("{A}", [1; 6]), adapter("{B}", usb)];
+        assert_eq!(unique_by_mac(&list, usb).map(SeLowAdapter::guid), Some("{B}"));
+        assert!(unique_by_mac(&list, [9; 6]).is_none());
+        // A virtual switch sharing the NIC's MAC: refuse to guess.
+        let shared = vec![adapter("{B}", usb), adapter("{C}", usb)];
+        assert!(unique_by_mac(&shared, usb).is_none());
     }
 }

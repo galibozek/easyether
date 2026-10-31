@@ -1005,31 +1005,22 @@ fn client_main(
     };
 
     // The virtual adapter stays open across reconnects, so the OS keeps its link, IP and routes.
-    let port: Arc<dyn L2Port> = Arc::from(l2::open_client(cfg.mac, log)?);
-    let ip_guard = match cfg.static_ipv4 {
-        Some((addr, prefix)) => match l2::apply_static_ipv4(addr, prefix, log) {
-            Ok(g) => Some(g),
-            Err(e) => {
-                log.error(format!("Could not set static IPv4 {addr}/{prefix}: {e}"));
-                None
-            }
-        },
-        None => match l2::start_dhcp(log) {
-            Ok(g) => g,
-            Err(e) => {
-                let fix = if e.kind() == io::ErrorKind::NotFound {
-                    "Install dhcpcd or set"
-                } else {
-                    "Set"
-                };
-                log.warn(format!(
-                    "No automatic IPv4 on '{}': {e}. {fix} a static IPv4 in Network settings.",
-                    l2::client_adapter_name()
-                ));
-                None
-            }
-        },
-    };
+    let adapter = Arc::new(l2::open_client(cfg.mac, log)?);
+    l2::prefer_local_networks(log);
+    let ip_guard = Arc::new(Mutex::new(configure_client_ip(cfg.static_ipv4, log)));
+    {
+        // A restarted adapter (driver restart, adapter disabled and enabled) comes back without
+        // its route priority and addresses: set them up again. The old guard goes first, so a
+        // static address is removed and added rather than left twice.
+        let (ip_guard, log, static_ipv4) = (ip_guard.clone(), log.clone(), cfg.static_ipv4);
+        adapter.set_on_reopen(move || {
+            l2::prefer_local_networks(&log);
+            let mut guard = ip_guard.lock().unwrap();
+            *guard = None;
+            *guard = configure_client_ip(static_ipv4, &log);
+        });
+    }
+    let port: Arc<dyn L2Port> = adapter.clone();
 
     let result = loop {
         log.status(format!("Connected to {peer} via '{}'", l2::client_adapter_name()));
@@ -1062,9 +1053,39 @@ fn client_main(
             }
         }
     };
-    drop(ip_guard);
+    // Remove the IP configuration while the adapter still exists, then close it.
+    ip_guard.lock().unwrap().take();
     drop(port);
+    drop(adapter);
     result
+}
+
+/// IPv4 on the client adapter: the static address, or DHCP. The guard undoes it when dropped.
+fn configure_client_ip(static_ipv4: Option<(Ipv4Addr, u8)>, log: &Logger) -> Option<Box<dyn Send>> {
+    match static_ipv4 {
+        Some((addr, prefix)) => match l2::apply_static_ipv4(addr, prefix, log) {
+            Ok(g) => Some(g),
+            Err(e) => {
+                log.error(format!("Could not set static IPv4 {addr}/{prefix}: {e}"));
+                None
+            }
+        },
+        None => match l2::start_dhcp(log) {
+            Ok(g) => g,
+            Err(e) => {
+                let fix = if e.kind() == io::ErrorKind::NotFound {
+                    "Install dhcpcd or set"
+                } else {
+                    "Set"
+                };
+                log.warn(format!(
+                    "No automatic IPv4 on '{}': {e}. {fix} a static IPv4 in Network settings.",
+                    l2::client_adapter_name()
+                ));
+                None
+            }
+        },
+    }
 }
 
 #[cfg(test)]
