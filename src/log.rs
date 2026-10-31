@@ -118,15 +118,25 @@ pub fn format_rtt(rtt: std::time::Duration) -> String {
     }
 }
 
-/// "12.3 KB/s" style formatting of a byte rate.
+/// A byte rate with three significant digits ("842 B/s", "8.42 KB/s", "84.2 KB/s",
+/// "842 KB/s", "8.42 MB/s"), so the text keeps about the same width as the value changes.
 pub fn format_rate(bytes_per_sec: u64) -> String {
     let b = bytes_per_sec as f64;
-    if b < 1000.0 {
+    let three = |v: f64, unit: &str| {
+        if v < 9.995 {
+            format!("{v:.2} {unit}")
+        } else if v < 99.95 {
+            format!("{v:.1} {unit}")
+        } else {
+            format!("{v:.0} {unit}")
+        }
+    };
+    if b < 999.5 {
         format!("{bytes_per_sec} B/s")
-    } else if b < 1_000_000.0 {
-        format!("{:.1} KB/s", b / 1000.0)
+    } else if b < 999_500.0 {
+        three(b / 1e3, "KB/s")
     } else {
-        format!("{:.2} MB/s", b / 1_000_000.0)
+        three(b / 1e6, "MB/s")
     }
 }
 
@@ -144,5 +154,19 @@ mod tests {
         assert_eq!(format_rtt(Duration::from_micros(4_600)), "5 ms");
         assert_eq!(format_rtt(Duration::from_millis(23)), "23 ms");
         assert_eq!(format_rtt(Duration::from_millis(1234)), "1.2 s");
+    }
+
+    #[test]
+    fn rates_have_three_digits() {
+        assert_eq!(format_rate(0), "0 B/s");
+        assert_eq!(format_rate(842), "842 B/s");
+        assert_eq!(format_rate(999), "999 B/s");
+        assert_eq!(format_rate(1_000), "1.00 KB/s");
+        assert_eq!(format_rate(8_423), "8.42 KB/s");
+        assert_eq!(format_rate(9_999), "10.0 KB/s");
+        assert_eq!(format_rate(84_230), "84.2 KB/s");
+        assert_eq!(format_rate(842_300), "842 KB/s");
+        assert_eq!(format_rate(999_600), "1.00 MB/s");
+        assert_eq!(format_rate(17_314_000), "17.3 MB/s");
     }
 }

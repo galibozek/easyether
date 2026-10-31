@@ -141,8 +141,8 @@ fn paint_arrow(painter: &egui::Painter, right: f32, y: f32, color: Color32, up: 
 }
 
 /// Tab badge, right-aligned at (`right`, `y`): `↓ rx ↑ tx · rtt` in the state's color, with
-/// "— B/s" / "— ms" for what is not known yet. `id` keeps the slot widths; forget them with [`reset_badge`].
-pub fn paint_badge(painter: &egui::Painter, id: egui::Id, right: f32, y: f32, color: Color32, badge: &Badge) {
+/// "— B/s" / "— ms" for what is not known yet.
+pub fn paint_badge(painter: &egui::Painter, right: f32, y: f32, color: Color32, badge: &Badge) {
     use crate::log::{format_rate, format_rtt};
     let font = egui::FontId::proportional(12.5);
     // Not known yet: the smallest unit, so the badge reads the same as with numbers.
@@ -153,16 +153,17 @@ pub fn paint_badge(painter: &egui::Painter, id: egui::Id, right: f32, y: f32, co
         rate(badge.traffic.map(|t| t.0)),
     ];
     let galleys = texts.map(|s| painter.layout_no_wrap(s, font.clone(), color));
-    // Each value is right-aligned in a slot that only grows, to the widest value shown so far:
-    // compact while waiting, and the arrows and dots do not jump back and forth with the
-    // numbers ("0 B/s" vs "123.4 KB/s").
-    let slots = painter.ctx().data_mut(|d| {
-        let slots = d.get_temp_mut_or(id, [0.0_f32; 3]);
-        for (slot, g) in slots.iter_mut().zip(&galleys) {
-            *slot = slot.max(g.size().x);
-        }
-        *slots
-    });
+    // Each value is right-aligned in a fixed slot as wide as the widest text its format gives
+    // (three significant digits, so "888 KB/s" or "8.88 MB/s"): the arrows and dots stay put,
+    // with no gap left over from a once wider value.
+    let widest = |samples: &[&str]| {
+        samples
+            .iter()
+            .map(|s| painter.layout_no_wrap(s.to_string(), font.clone(), color).size().x)
+            .fold(0.0, f32::max)
+    };
+    let rate_slot = widest(&["888 B/s", "888 KB/s", "8.88 KB/s", "8.88 MB/s", "888 MB/s"]);
+    let slots = [widest(&["888 ms", "8.8 s", "<1 ms"]), rate_slot, rate_slot];
     let [rtt, tx, rx] = galleys;
     let text_right = |x: f32, g: std::sync::Arc<egui::Galley>| {
         painter.galley(egui::pos2(x - g.size().x, y - g.size().y / 2.0), g, color);
@@ -178,11 +179,6 @@ pub fn paint_badge(painter: &egui::Painter, id: egui::Id, right: f32, y: f32, co
     x = paint_arrow(painter, x - slots[1] - 3.0, y, color, true) - 7.0;
     text_right(x, rx);
     paint_arrow(painter, x - slots[2] - 3.0, y, color, false);
-}
-
-/// Forgets the badge's grown slot widths, so the next start begins compact again.
-pub fn reset_badge(ctx: &egui::Context, id: egui::Id) {
-    ctx.data_mut(|d| d.remove::<[f32; 3]>(id));
 }
 
 fn paint_sun(painter: &egui::Painter, c: egui::Pos2, color: Color32) {
