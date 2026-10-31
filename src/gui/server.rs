@@ -276,6 +276,8 @@ impl ServerTab {
                             egui::Grid::new("my_addresses")
                                 .num_columns(2)
                                 .spacing([12.0, 2.0])
+                                // Rows default to the height of a button (30 px here); text lines need less.
+                                .min_row_height(0.0)
                                 .show(ui, |ui| {
                                     for (name, ip) in &self.addresses {
                                         ui.label(format!("{ip}:{port}"));
