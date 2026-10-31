@@ -41,6 +41,8 @@ pub struct App {
     /// Missing drivers reported at startup (Windows); shown until dismissed.
     driver_prompt: Vec<&'static str>,
     tray: Option<tray::Tray>,
+    /// The tray icon's hover text as last set, so it is only updated when it changes.
+    tray_tip: String,
     tray_hint_shown: bool,
     /// Whether the window was minimized in the previous frame (minimizing goes to the tray).
     was_minimized: bool,
@@ -76,6 +78,7 @@ impl App {
         let tray = None;
         App {
             tray,
+            tray_tip: String::new(),
             tray_hint_shown: false,
             was_minimized: false,
             install_notice: false,
@@ -332,6 +335,20 @@ impl eframe::App for App {
         // The connection time in the status bar ticks every second.
         if self.server.is_running() || self.client.is_running() {
             ctx.request_repaint_after(std::time::Duration::from_secs(1));
+        }
+
+        // The tray icon's hover text: what runs, in which mode, connected to whom.
+        if let Some(tray) = &self.tray {
+            let state = self
+                .server
+                .tray_status(&self.settings)
+                .or_else(|| self.client.tray_status(&self.settings))
+                .unwrap_or_else(|| "not sharing or connected".into());
+            let tip = format!("EasyEther – {state}");
+            if tip != self.tray_tip {
+                tray.set_tooltip(&tip);
+                self.tray_tip = tip;
+            }
         }
 
         while let Some(cmd) = self.tray.as_ref().and_then(|t| t.poll()) {

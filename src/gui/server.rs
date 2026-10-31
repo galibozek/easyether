@@ -98,6 +98,25 @@ impl ServerTab {
         }
     }
 
+    /// What the tray icon's hover text says while sharing: mode and port, the client and, once
+    /// connected, the traffic. `None` while off.
+    pub fn tray_status(&self, settings: &Settings) -> Option<String> {
+        if !self.is_running() {
+            return None;
+        }
+        let mode = if settings.server_secure { "Secure" } else { "Insecure" };
+        let head = format!("Server ({mode}, port {})", self.port.trim());
+        let session = self.worker.handle.as_ref().and_then(|h| h.client_session());
+        Some(match session {
+            Some((addr, since)) => format!(
+                "{head}\nclient {addr} connected · {}\n{}",
+                crate::log::format_uptime(since.elapsed()),
+                widgets::traffic_line(self.worker.traffic, self.worker.rtt)
+            ),
+            None => format!("{head}\nwaiting for a client"),
+        })
+    }
+
     /// Short state for the tab badge: the live connection, or that we wait for one. Nothing
     /// while off; errors and other details are in the status bar only.
     pub fn badge(&self) -> Option<widgets::Badge> {
