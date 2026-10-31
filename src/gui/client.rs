@@ -44,7 +44,7 @@ impl ClientTab {
     /// Forgets how the last connection ended ("Disconnected"), once the other side has been
     /// started.
     pub fn clear_outcome(&mut self) {
-        if !self.is_running() {
+        if !self.is_running() && self.worker.status != "Disconnected" {
             self.worker.status = "Disconnected".into();
         }
     }
@@ -55,7 +55,12 @@ impl ClientTab {
         use widgets::{Activity, Badge};
         if !self.is_running() {
             None
-        } else if self.worker.status.starts_with("Connected") {
+        } else if self
+            .worker
+            .handle
+            .as_ref()
+            .is_some_and(|h| h.client_link().since.is_some())
+        {
             Some(Badge::new(Activity::On).traffic(self.worker.traffic, self.worker.rtt))
         } else {
             Some(Badge::new(Activity::Pending))
