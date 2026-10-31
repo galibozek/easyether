@@ -38,9 +38,13 @@ pub fn server_opener(id: &str, log: &Logger) -> crate::l2::Opener {
     let mac = selow::mac_of(id);
     let guid = Mutex::new(id.to_string());
     let log = log.clone();
+    // Only the first open (Share) waits for a missing adapter; reopens are retried every second
+    // by the caller and must not block (see selow::open).
+    let first = std::sync::atomic::AtomicBool::new(true);
     Box::new(move || {
+        let wait = first.swap(false, std::sync::atomic::Ordering::SeqCst);
         let current = guid.lock().unwrap().clone();
-        let e = match selow::open(&current, &log) {
+        let e = match selow::open(&current, &log, wait) {
             Ok(p) => return Ok(Box::new(p) as Box<dyn L2Port>),
             Err(e) => e,
         };
@@ -51,7 +55,7 @@ pub fn server_opener(id: &str, log: &Logger) -> crate::l2::Opener {
         let Some(other) = selow::guid_by_mac(mac).filter(|g| !g.eq_ignore_ascii_case(&current)) else {
             return Err(e);
         };
-        let p = selow::open(&other, &log)?;
+        let p = selow::open(&other, &log, false)?;
         log.info(format!(
             "The shared adapter came back as a new device ({other}, same MAC {}); using it.",
             super::format_mac(&mac)
