@@ -86,13 +86,14 @@ pub fn prefer_local_networks(log: &Logger) {
         }
     };
     // Right after the adapter was (re)enabled, its IP interfaces can appear a moment after the
-    // device does: keep trying for a few seconds. IPv6 may simply be unbound, so only IPv4
-    // gets a warning in the end.
+    // device does: keep trying for a few seconds, but only while IPv4 is missing. IPv6 is
+    // often unbound from the adapter and then never appears; waiting for it would delay every
+    // connect. It gets an attempt in each round, and only IPv4 gets a warning in the end.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let mut pending = vec![AF_INET, AF_INET6];
     loop {
         pending.retain(|&family| !set_tunnel_metric(luid, family, log));
-        if pending.is_empty() || std::time::Instant::now() >= deadline {
+        if !pending.contains(&AF_INET) || std::time::Instant::now() >= deadline {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(250));
