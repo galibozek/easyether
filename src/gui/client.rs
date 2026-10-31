@@ -221,11 +221,14 @@ impl ClientTab {
             |ui| {
                 // Where we are connected, for how long, and how stable it has been; the tab
                 // shows the state itself.
-                widgets::muted(ui, "Server");
-                if self.host.trim().is_empty() {
-                    widgets::truncated(ui, "-", p.muted, false);
-                } else {
+                widgets::muted(ui, "Status");
+                if !running {
+                    widgets::truncated(ui, "not connected", p.muted, false);
+                } else if link.since.is_some() {
                     widgets::truncated(ui, server, p.text, true);
+                } else {
+                    // Connecting or reconnecting: the target, greyed out.
+                    widgets::truncated(ui, server, p.muted, false);
                 }
                 if let Some(since) = link.since {
                     widgets::muted(ui, format!("connected {}", crate::log::format_uptime(since.elapsed())));

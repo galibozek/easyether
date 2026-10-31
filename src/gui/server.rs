@@ -257,7 +257,7 @@ impl ServerTab {
             ui,
             |ui| {
                 // Who is connected and for how long; the tab shows the state itself.
-                widgets::muted(ui, "Client");
+                widgets::muted(ui, "Status");
                 match client {
                     Some((addr, since)) if running => {
                         widgets::truncated(ui, addr.to_string(), p.text, true);
@@ -268,12 +268,12 @@ impl ServerTab {
                         widgets::truncated(ui, "adapter unavailable - waiting for it to come back", p.warn, false)
                     }
                     _ if running => widgets::truncated(ui, "waiting…", p.muted, false),
-                    _ => widgets::truncated(ui, "-", p.muted, false),
+                    _ => widgets::truncated(ui, "client not connected", p.muted, false),
                 }
             },
             |ui| {
                 ui.label(RichText::new(address).strong());
-                widgets::muted(ui, "Address");
+                widgets::muted(ui, "My address");
             },
         );
 
