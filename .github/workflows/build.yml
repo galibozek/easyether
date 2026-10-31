@@ -1,10 +1,13 @@
-# Release packages: when a GitHub release is published (from a tag), builds the Linux tarball and
-# the Windows x64/x86 ZIPs and attaches them to that release. Code checks run in ci.yml.
+# Release packages: when a version tag (v*) is pushed, builds the Linux tarball and the Windows
+# x64/x86 ZIPs, creates the GitHub release as a draft with them attached, then publishes it.
+# Releases are immutable in this repository: files can only be added before publishing, so do not
+# create the release by hand; push the tag. The release starts without notes; they are written
+# on GitHub afterwards (notes stay editable). Code checks run in ci.yml.
 name: build
 
 on:
-  release:
-    types: [published]
+  push:
+    tags: ["v*"]
 
 # Actions are pinned to full commit SHAs (version in the comment).
 permissions:
@@ -62,10 +65,15 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: dist
           merge-multiple: true
-      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
-        with:
-          files: dist/*
+      - name: Create the release as a draft with the packages, then publish it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" dist/* --draft --verify-tag --title "EasyEther ${TAG#v}" --notes ""
+          gh release edit "$TAG" --draft=false --latest
