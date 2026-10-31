@@ -91,7 +91,7 @@ pub fn style(ctx: &egui::Context) {
 
 /// What a tab shows about its side of the tunnel.
 /// A running side's tab badge: download, upload and latency in the state's color,
-/// each "-" until known (waiting for a client, connecting).
+/// each "---" until known (waiting for a client, connecting).
 pub struct Badge {
     pub activity: Activity,
     pub traffic: Option<(u64, u64)>,
@@ -141,29 +141,50 @@ fn paint_arrow(painter: &egui::Painter, right: f32, y: f32, color: Color32, up: 
     right - w
 }
 
-/// Tab badge, right-aligned at (`right`, `y`): `↓ rx ↑ tx · rtt` in the state's color, with "-"
-/// for what is not known yet.
-pub fn paint_badge(painter: &egui::Painter, right: f32, y: f32, color: Color32, badge: &Badge) {
+/// Tab badge, right-aligned at (`right`, `y`): `↓ rx ↑ tx · rtt` in the state's color, with
+/// "---" for what is not known yet. `id` keeps the slot widths; forget them with [`reset_badge`].
+pub fn paint_badge(painter: &egui::Painter, id: egui::Id, right: f32, y: f32, color: Color32, badge: &Badge) {
+    use crate::log::{format_rate, format_rtt};
     let font = egui::FontId::proportional(12.5);
-    let text_right = |x: f32, s: &str| -> f32 {
-        painter
-            .text(egui::pos2(x, y), egui::Align2::RIGHT_CENTER, s, font.clone(), color)
-            .left()
+    let rate = |v: Option<u64>| v.map_or_else(|| "---".to_string(), format_rate);
+    let texts = [
+        badge.rtt.map_or_else(|| "---".to_string(), format_rtt),
+        rate(badge.traffic.map(|t| t.1)),
+        rate(badge.traffic.map(|t| t.0)),
+    ];
+    let galleys = texts.map(|s| painter.layout_no_wrap(s, font.clone(), color));
+    // Each value is right-aligned in a slot that starts as wide as the smallest unit ("0 B/s",
+    // "0.0 ms") and only grows, to the widest value shown so far: compact while waiting, and the
+    // arrows and dots do not jump back and forth with the numbers ("0 B/s" vs "123.4 KB/s").
+    let width = |s: String| painter.layout_no_wrap(s, font.clone(), color).size().x;
+    let (rate_min, rtt_min) = (width(format_rate(0)), width(format_rtt(std::time::Duration::ZERO)));
+    let slots = painter.ctx().data_mut(|d| {
+        let slots = d.get_temp_mut_or(id, [rtt_min, rate_min, rate_min]);
+        for (slot, g) in slots.iter_mut().zip(&galleys) {
+            *slot = slot.max(g.size().x);
+        }
+        *slots
+    });
+    let [rtt, tx, rx] = galleys;
+    let text_right = |x: f32, g: std::sync::Arc<egui::Galley>| {
+        painter.galley(egui::pos2(x - g.size().x, y - g.size().y / 2.0), g, color);
     };
-    // Each value has a fixed slot and is right-aligned in it, so the arrows and dots never move:
-    // not when the numbers change ("0 B/s" vs "123.4 KB/s"), and not when a waiting "-" turns
-    // into a number. Sized for the widest values: "999.99 MB/s" and "999 ms".
-    const RATE_SLOT: f32 = 72.0;
-    const RTT_SLOT: f32 = 46.0;
-    let rate = |v: Option<u64>| v.map_or_else(|| "-".to_string(), crate::log::format_rate);
-    let rtt = badge.rtt.map_or_else(|| "-".to_string(), crate::log::format_rtt);
     let mut x = right;
-    text_right(x, &rtt);
-    x = text_right(x - RTT_SLOT - 6.0, "·") - 6.0;
-    text_right(x, &rate(badge.traffic.map(|t| t.1)));
-    x = paint_arrow(painter, x - RATE_SLOT - 3.0, y, color, true) - 7.0;
-    text_right(x, &rate(badge.traffic.map(|t| t.0)));
-    paint_arrow(painter, x - RATE_SLOT - 3.0, y, color, false);
+    text_right(x, rtt);
+    x -= slots[0] + 6.0;
+    let dot = painter.layout_no_wrap("·".into(), font.clone(), color);
+    let dot_w = dot.size().x;
+    text_right(x, dot);
+    x -= dot_w + 6.0;
+    text_right(x, tx);
+    x = paint_arrow(painter, x - slots[1] - 3.0, y, color, true) - 7.0;
+    text_right(x, rx);
+    paint_arrow(painter, x - slots[2] - 3.0, y, color, false);
+}
+
+/// Forgets the badge's grown slot widths, so the next start begins compact again.
+pub fn reset_badge(ctx: &egui::Context, id: egui::Id) {
+    ctx.data_mut(|d| d.remove::<[f32; 3]>(id));
 }
 
 fn paint_sun(painter: &egui::Painter, c: egui::Pos2, color: Color32) {
