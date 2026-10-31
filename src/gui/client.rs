@@ -206,7 +206,14 @@ impl ClientTab {
             widgets::caption(ui, "IPv4");
             ui.label(RichText::new(net).strong());
             widgets::muted(ui, "on");
-            ui.label(RichText::new(l2::client_adapter_name()).color(widgets::pal(ui).text));
+            // The adapter's name can be long (Windows); it fades out with "…" instead of
+            // pushing the button away, and is complete on hover.
+            let name = l2::client_adapter_name();
+            ui.scope(|ui| {
+                ui.set_max_width(150.0);
+                ui.add(egui::Label::new(RichText::new(name).color(widgets::pal(ui).text)).truncate())
+                    .on_hover_text(name);
+            });
             if widgets::small_button(ui, !running, "Network settings").clicked() {
                 self.net_dialog = Some(NetDialog {
                     static_ip: settings.static_ipv4_enabled,
