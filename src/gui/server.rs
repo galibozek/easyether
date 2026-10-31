@@ -232,11 +232,10 @@ impl ServerTab {
                         .size(20.0)
                         .strong(),
                 );
-                if ui.add(widgets::secondary_button("Copy")).clicked() {
+                if widgets::compact_button(ui, true, "Copy").clicked() {
                     ui.ctx().copy_text(self.password.clone());
                 }
-                let new_pw = ui
-                    .add(widgets::secondary_button("New password"))
+                let new_pw = widgets::compact_button(ui, true, "New password")
                     .on_hover_text("A connected client is disconnected, since its password stops being valid.");
                 if new_pw.clicked() {
                     if self.has_client() {

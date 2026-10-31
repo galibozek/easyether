@@ -241,6 +241,18 @@ pub fn secondary_button(text: &str) -> egui::Button<'static> {
     egui::Button::new(text.to_string()).min_size(egui::vec2(84.0, 32.0))
 }
 
+/// A secondary button only as wide as its text, with tighter side padding, for settings rows.
+pub fn compact_button(ui: &mut egui::Ui, enabled: bool, text: &str) -> egui::Response {
+    ui.scope(|ui| {
+        ui.spacing_mut().button_padding.x = 10.0;
+        ui.add_enabled(
+            enabled,
+            egui::Button::new(text.to_string()).min_size(egui::vec2(0.0, 32.0)),
+        )
+    })
+    .inner
+}
+
 /// Modal dialog with a dimmed backdrop: title, body, and right-aligned `[cancel] [primary]`.
 /// Returns `Some(true)` for the primary button, `Some(false)` for cancel / Esc / click outside.
 pub fn modal(
@@ -391,7 +403,7 @@ impl LogView {
     fn rebuild(&mut self, p: &Palette, dark: bool) {
         self.text.clear();
         self.job = egui::text::LayoutJob::default();
-        let font = egui::FontId::proportional(13.5);
+        let font = egui::FontId::proportional(12.5);
         for (i, l) in self.lines.iter().enumerate() {
             let color = match l.level {
                 Level::Info => p.text,

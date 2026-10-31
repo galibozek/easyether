@@ -191,10 +191,7 @@ impl ClientTab {
             ui.label(RichText::new(net).strong());
             widgets::muted(ui, format!("on {}", l2::client_adapter_name()));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .add_enabled(!running, widgets::secondary_button("Network settings"))
-                    .clicked()
-                {
+                if widgets::compact_button(ui, !running, "Network settings").clicked() {
                     self.net_dialog = Some(NetDialog {
                         static_ip: settings.static_ipv4_enabled,
                         address: settings.static_ipv4_address.clone(),
