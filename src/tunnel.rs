@@ -685,13 +685,13 @@ fn server_main(
         .map_err(|e| io::Error::new(e.kind(), format!("cannot listen on TCP port {}: {e}", cfg.port)))?;
     if cfg.secure {
         log.info(format!(
-            "Listening on TCP port {} (Secure: TLS 1.3 + password, certificate {}...). Waiting for a client.",
+            "Listening on TCP port {} (Secure: TLS 1.3 + password, certificate {}...).",
             cfg.port,
             identity.fingerprint_hex()
         ));
     } else {
         log.warn(format!(
-            "Listening on TCP port {} in INSECURE mode: no encryption, no password. Waiting for a client.",
+            "Listening on TCP port {} in INSECURE mode: no encryption, no password.",
             cfg.port
         ));
     }
