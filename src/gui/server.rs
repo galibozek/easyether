@@ -84,20 +84,24 @@ impl ServerTab {
         self.worker.is_running()
     }
 
-    /// Short state for the tab badge; none while off.
+    /// Forgets how the last run ended ("Error"), once the other side has been started.
+    pub fn clear_outcome(&mut self) {
+        if !self.is_running() {
+            self.worker.status = "Stopped".into();
+        }
+    }
+
+    /// Short state for the tab badge: the live connection, or that we wait for one. Nothing
+    /// while off; errors and other details are in the status bar only.
     pub fn badge(&self) -> Option<widgets::Badge> {
         use widgets::{Activity, Badge};
-        Some(if !self.is_running() {
-            if self.worker.status.starts_with("Error") {
-                Badge::new("Error", Activity::Pending)
-            } else {
-                return None;
-            }
+        if !self.is_running() {
+            None
         } else if self.worker.status.contains("client connected") {
-            Badge::new("Client connected", Activity::On).traffic(self.worker.traffic, self.worker.rtt)
+            Some(Badge::new("Connected", Activity::On).traffic(self.worker.traffic, self.worker.rtt))
         } else {
-            Badge::new("Active · waiting for a client", Activity::On)
-        })
+            Some(Badge::new("Waiting for a client", Activity::Pending))
+        }
     }
 
     pub fn poll(&mut self) {
@@ -251,24 +255,42 @@ impl ServerTab {
         });
 
         let address = format!("{}:{}", self.local_ip, self.port.trim());
-        let client = self.worker.handle.as_ref().and_then(|h| h.client_session());
+        let handle = self.worker.handle.as_ref();
+        let client = handle.and_then(|h| h.client_session());
+        let last = handle.and_then(|h| h.last_client());
+        let status = self.worker.status.as_str();
         let p = widgets::pal(ui);
+        let uptime = |since: std::time::Instant| crate::log::format_uptime(since.elapsed());
         widgets::status_bar(
             ui,
             |ui| {
-                // Who is connected and for how long; the tab shows the state itself.
+                // Details the tab does not show: who is connected and for how long, who left,
+                // and what is wrong.
                 widgets::muted(ui, "Status");
                 match client {
                     Some((addr, since)) if running => {
-                        widgets::truncated(ui, addr.to_string(), p.text, true);
-                        widgets::muted(ui, format!("connected {}", crate::log::format_uptime(since.elapsed())));
+                        widgets::truncated(ui, format!("client {addr}"), p.text, true);
+                        widgets::muted(ui, format!("· connected {}", uptime(since)));
                     }
-                    // Not on the tab: the shared adapter vanished (USB unplugged...).
-                    _ if running && self.worker.status.starts_with("Adapter unavailable") => {
-                        widgets::truncated(ui, "adapter unavailable - waiting for it to come back", p.warn, false)
+                    _ if running && status.starts_with("Adapter unavailable") => {
+                        widgets::truncated(ui, "adapter unplugged · waiting for it", p.warn, false);
                     }
-                    _ if running => widgets::truncated(ui, "waiting…", p.muted, false),
-                    _ => widgets::truncated(ui, "client not connected", p.muted, false),
+                    _ if running && status.starts_with("Starting") => {
+                        widgets::truncated(ui, "starting…", p.muted, false);
+                    }
+                    _ if running => match last {
+                        Some((addr, left)) => widgets::truncated(
+                            ui,
+                            format!("client {} left {} ago · waiting", addr.ip(), uptime(left)),
+                            p.muted,
+                            false,
+                        ),
+                        None => widgets::truncated(ui, "waiting for a client", p.muted, false),
+                    },
+                    _ if status.starts_with("Error") => {
+                        widgets::truncated(ui, "could not start · see log", p.warn, false);
+                    }
+                    _ => widgets::truncated(ui, "not sharing", p.muted, false),
                 }
             },
             |ui| {

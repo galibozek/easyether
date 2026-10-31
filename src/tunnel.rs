@@ -65,6 +65,8 @@ pub struct TunnelHandle {
     sock: Arc<Mutex<Option<TcpStream>>>,
     /// Server only: the running client session, if any.
     active: Arc<Mutex<Option<ActiveSession>>>,
+    /// Server only: the last client whose session ended, and when.
+    last_client: Arc<Mutex<Option<(SocketAddr, Instant)>>>,
     /// Client only: the current connection, for the GUI.
     link: Arc<Mutex<ClientLink>>,
 }
@@ -135,6 +137,11 @@ impl TunnelHandle {
     /// Server only: the connected client's address and since when it is connected, if any.
     pub fn client_session(&self) -> Option<(SocketAddr, Instant)> {
         self.active.lock().unwrap().as_ref().map(|s| (s.peer, s.since))
+    }
+
+    /// Server only: the last client whose session ended, and when.
+    pub fn last_client(&self) -> Option<(SocketAddr, Instant)> {
+        *self.last_client.lock().unwrap()
     }
 
     /// Client only: the current connection.
@@ -504,10 +511,11 @@ pub fn start_server(cfg: ServerConfig, log: Logger) -> TunnelHandle {
     // Same normalization as the client applies to what the user types.
     let password = Arc::new(Mutex::new(secure::normalize_password(&cfg.password)));
     let active: Arc<Mutex<Option<ActiveSession>>> = Arc::default();
+    let last_client: Arc<Mutex<Option<(SocketAddr, Instant)>>> = Arc::default();
     let thread = {
-        let (stop, password, active) = (stop.clone(), password.clone(), active.clone());
+        let (stop, password, active, last) = (stop.clone(), password.clone(), active.clone(), last_client.clone());
         std::thread::spawn(move || {
-            if let Err(e) = server_main(&cfg, stop, password, active, &log) {
+            if let Err(e) = server_main(&cfg, stop, password, active, last, &log) {
                 // Full message in the log; the status line stays short.
                 log.error(e.to_string());
                 log.status("Error - see log");
@@ -523,6 +531,7 @@ pub fn start_server(cfg: ServerConfig, log: Logger) -> TunnelHandle {
         password,
         sock: Arc::default(),
         active,
+        last_client,
         link: Arc::default(),
     }
 }
@@ -624,6 +633,8 @@ struct Server {
     pending: Mutex<Vec<TcpStream>>,
     /// The running session, if any (shared with TunnelHandle for "disconnect client").
     active: Arc<Mutex<Option<ActiveSession>>>,
+    /// The last client whose session ended, and when (shared with TunnelHandle for the GUI).
+    last_client: Arc<Mutex<Option<(SocketAddr, Instant)>>>,
     /// Held for the duration of a session (only one client at a time).
     session_slot: Mutex<()>,
 }
@@ -633,6 +644,7 @@ fn server_main(
     stop: Arc<AtomicBool>,
     password: Arc<Mutex<String>>,
     active: Arc<Mutex<Option<ActiveSession>>>,
+    last_client: Arc<Mutex<Option<(SocketAddr, Instant)>>>,
     log: &Logger,
 ) -> io::Result<()> {
     // Blocked IPs and wrong-password counters live in this run only, so Stop/Share resets them.
@@ -670,6 +682,7 @@ fn server_main(
         handshakes: AtomicUsize::new(0),
         pending: Mutex::default(),
         active,
+        last_client,
         session_slot: Mutex::new(()),
     });
     serve(listener, server)
@@ -911,8 +924,10 @@ impl Server {
 
     fn clear_active(&self, mine: &Arc<AtomicBool>) {
         let mut a = self.active.lock().unwrap();
-        if a.as_ref().is_some_and(|s| Arc::ptr_eq(&s.stop, mine)) {
-            *a = None;
+        if a.as_ref().is_some_and(|s| Arc::ptr_eq(&s.stop, mine))
+            && let Some(s) = a.take()
+        {
+            *self.last_client.lock().unwrap() = Some((s.peer, Instant::now()));
         }
     }
 }
@@ -1009,9 +1024,11 @@ pub fn start_client(cfg: ClientConfig, log: Logger) -> TunnelHandle {
             // the client as disconnected in a warning color.
             Ok(()) => log.status("Disconnected"),
             Err(e) if e.kind() == io::ErrorKind::ConnectionAborted => log.status(format!("Disconnected - {e}")),
+            // The reason (wrong password, Secure mismatch, adapter error...) also goes to the
+            // status, where the GUI shows it next to "see log".
             Err(e) => {
                 log.error(e.to_string());
-                log.status("Disconnected - see log");
+                log.status(format!("Disconnected - error: {e}"));
             }
         })
     };
@@ -1021,6 +1038,7 @@ pub fn start_client(cfg: ClientConfig, log: Logger) -> TunnelHandle {
         password: Arc::default(),
         sock,
         active: Arc::default(),
+        last_client: Arc::default(),
         link,
     }
 }
@@ -1471,6 +1489,7 @@ mod tests {
                 handshakes: AtomicUsize::new(0),
                 pending: Mutex::default(),
                 active: active.clone(),
+                last_client: Arc::default(),
                 session_slot: Mutex::new(()),
             });
             let thread = std::thread::spawn(move || serve(listener, server));
