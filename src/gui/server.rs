@@ -267,33 +267,25 @@ impl ServerTab {
         let uptime = |since: std::time::Instant| crate::log::format_uptime(since.elapsed());
         widgets::status_bar(ui, |ui| {
             // Details the tab does not show: who is connected and for how long, who left,
-            // and what is wrong.
+            // and what is wrong. One color for the message, the warning color for problems.
             widgets::muted(ui, "Status");
-            match client {
-                Some((addr, since)) if running => {
-                    widgets::truncated(ui, format!("client {addr}"), p.text, true);
-                    widgets::muted(ui, format!("· connected {}", uptime(since)));
-                }
+            let (text, color) = match client {
+                Some((addr, since)) if running => (format!("client {addr} · connected {}", uptime(since)), p.text),
                 _ if running && status.starts_with("Adapter unavailable") => {
-                    widgets::truncated(ui, "adapter unplugged · waiting for it", p.warn, false);
+                    ("adapter unplugged · waiting for it".into(), p.warn)
                 }
-                _ if running && status.starts_with("Starting") => {
-                    widgets::truncated(ui, "starting…", p.muted, false);
-                }
+                _ if running && status.starts_with("Starting") => ("starting…".into(), p.text),
                 _ if running => match last {
-                    Some((addr, left)) => widgets::truncated(
-                        ui,
+                    Some((addr, left)) => (
                         format!("client {} left {} ago · waiting", addr.ip(), uptime(left)),
-                        p.muted,
-                        false,
+                        p.text,
                     ),
-                    None => widgets::truncated(ui, "waiting for a client", p.muted, false),
+                    None => ("waiting for a client".into(), p.text),
                 },
-                _ if status.starts_with("Error") => {
-                    widgets::truncated(ui, "could not start · see log", p.warn, false);
-                }
-                _ => widgets::truncated(ui, "not sharing", p.muted, false),
-            }
+                _ if status.starts_with("Error") => ("could not start · see log".into(), p.warn),
+                _ => ("not sharing".into(), p.text),
+            };
+            widgets::truncated(ui, text, color);
         });
 
         self.worker.log.ui(ui, "Server Log");
