@@ -186,20 +186,18 @@ impl ClientTab {
             "Automatic (DHCP)".into()
         };
         ui.horizontal(|ui| {
-            ui.set_min_height(36.0);
+            ui.set_min_height(widgets::SETTINGS_ROW_HEIGHT);
             widgets::caption(ui, "IPv4");
             ui.label(RichText::new(net).strong());
             widgets::muted(ui, format!("on {}", l2::client_adapter_name()));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if widgets::compact_button(ui, !running, "Network settings").clicked() {
-                    self.net_dialog = Some(NetDialog {
-                        static_ip: settings.static_ipv4_enabled,
-                        address: settings.static_ipv4_address.clone(),
-                        mask: settings.static_ipv4_mask.clone(),
-                        error: String::new(),
-                    });
-                }
-            });
+            if widgets::small_button(ui, !running, "Network settings").clicked() {
+                self.net_dialog = Some(NetDialog {
+                    static_ip: settings.static_ipv4_enabled,
+                    address: settings.static_ipv4_address.clone(),
+                    mask: settings.static_ipv4_mask.clone(),
+                    error: String::new(),
+                });
+            }
         });
 
         let server = format!("{}:{}", self.host.trim(), self.port.trim());
