@@ -224,7 +224,13 @@ impl ClientTab {
             }
         });
 
-        let server = format!("{}:{}", self.host.trim(), self.port.trim());
+        // An IPv6 address in brackets, so the port is not read as part of it.
+        let host = self.host.trim();
+        let server = if host.contains(':') {
+            format!("[{host}]:{}", self.port.trim())
+        } else {
+            format!("{host}:{}", self.port.trim())
+        };
         let status = self.worker.status.as_str();
         let link = self
             .worker
@@ -358,12 +364,16 @@ fn retry(status: &str) -> Option<(&str, String)> {
     Some((reason, format!("retry in {secs} s (#{attempt})")))
 }
 
-/// "1.2.3.4:5000", "[fe80::1]:5000" or "host:5000" split into address and port. A bare IPv6
-/// address ("fe80::1") is left alone.
+/// "1.2.3.4:5000", "[fe80::1%12]:5000" or "host:5000" split into address and port (an IPv6
+/// zone is kept). A bare IPv6 address ("fe80::1") is left alone.
 fn split_host_port(text: &str) -> Option<(String, u16)> {
     let text = text.trim();
-    if let Ok(addr) = text.parse::<std::net::SocketAddr>() {
-        return Some((addr.ip().to_string(), addr.port()));
+    if let Some(rest) = text.strip_prefix('[') {
+        let (host, port) = rest.split_once("]:")?;
+        if host.is_empty() {
+            return None;
+        }
+        return Some((host.to_string(), port.parse().ok()?));
     }
     let (host, port) = text.split_once(':')?;
     if host.is_empty() || host.contains(':') || port.contains(':') {
@@ -381,6 +391,8 @@ mod tests {
         let split = split_host_port;
         assert_eq!(split("192.168.10.116:5000"), Some(("192.168.10.116".into(), 5000)));
         assert_eq!(split(" [fe80::1]:5000 "), Some(("fe80::1".into(), 5000)));
+        assert_eq!(split("[fe80::1%12]:5000"), Some(("fe80::1%12".into(), 5000)));
+        assert_eq!(split("[]:5000"), None);
         assert_eq!(split("vci.local:6000"), Some(("vci.local".into(), 6000)));
         assert_eq!(split("fe80::1"), None);
         assert_eq!(split("192.168.10.116"), None);
