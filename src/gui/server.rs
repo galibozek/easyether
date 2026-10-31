@@ -188,16 +188,23 @@ impl ServerTab {
                     .and_then(|i| self.adapters.get(i))
                     .map(|a| format!("{}   {}", a.name, a.detail))
                     .unwrap_or_else(|| "(no adapter)".into());
+                // egui truncates text only to the width it is given: the box gets its own width,
+                // the list a fixed one up to the window's edge; long names (Windows) end in "…",
+                // complete on hover.
+                let list_width = ui.ctx().content_rect().right() - ui.cursor().left() - 16.0;
                 ui.add_enabled_ui(!running, |ui| {
-                    // The list shows the full names; the chosen one is cut to the box's width
-                    // so a long name (Windows) does not push the other fields out.
+                    ui.set_max_width(combo_width);
                     egui::ComboBox::from_id_salt("adapter")
                         .width(combo_width)
                         .truncate()
                         .selected_text(&current)
                         .show_ui(ui, |ui| {
+                            ui.set_width(list_width.max(combo_width));
+                            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
                             for (i, a) in self.adapters.iter().enumerate() {
-                                ui.selectable_value(&mut self.selected, Some(i), format!("{}   {}", a.name, a.detail));
+                                let name = format!("{}   {}", a.name, a.detail);
+                                ui.selectable_value(&mut self.selected, Some(i), &name)
+                                    .on_hover_text(&name);
                             }
                         })
                         .response
