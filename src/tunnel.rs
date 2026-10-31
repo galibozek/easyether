@@ -163,6 +163,8 @@ struct ActiveSession {
     sock: Option<TcpStream>,
     /// When the peer last sent anything (keepalives count), to tell a live session from a dead one.
     last_rx: Arc<Mutex<Instant>>,
+    /// The client's id, so that client (and only it) can take its own session over.
+    client_id: proto::ClientId,
 }
 
 impl ActiveSession {
@@ -698,12 +700,17 @@ impl Server {
 
         // An authenticated client takes over from a previous session, which after a network
         // hiccup is usually the same client's dead connection still waiting for its timeout.
-        // A live session is never taken away from its client. Only a dead one (peer silent for
-        // STALE_SESSION, e.g. the same client's old connection after a network drop) is replaced.
+        // A live session is never taken away from its client: another client may only replace
+        // a dead one (peer silent for STALE_SESSION). The same client (same id) may replace its
+        // own session at once: it has given that connection up (it reconnects only after its
+        // side failed), but the server may not have noticed yet, e.g. when the client's network
+        // changed and no FIN/RST arrived. Waiting for STALE_SESSION there would stall the
+        // traffic for up to ~18 s, long enough to break an ECU programming session.
+        let client_id = auth.client_id();
         let old = {
             let mut active = self.active.lock().unwrap();
             match active.as_ref() {
-                Some(cur) if cur.last_rx.lock().unwrap().elapsed() < STALE_SESSION => {
+                Some(cur) if cur.last_rx.lock().unwrap().elapsed() < STALE_SESSION && cur.client_id != client_id => {
                     drop(active);
                     self.log
                         .info(format!("Rejected {peer}: another client is connected and active."));
@@ -714,8 +721,14 @@ impl Server {
             }
         };
         if let Some(old) = &old {
-            self.log
-                .info(format!("{peer} replaces the previous (unresponsive) client session."));
+            if old.client_id == client_id {
+                self.log.info(format!(
+                    "{peer}: the client reconnected; replacing its previous connection."
+                ));
+            } else {
+                self.log
+                    .info(format!("{peer} replaces the previous (unresponsive) client session."));
+            }
             // Stop flag first: within ~50 ms the old session sends Close (so that client does
             // not reconnect and fight over the slot); cut the socket only if it does not end.
             old.stop.store(true, Ordering::SeqCst);
@@ -753,6 +766,7 @@ impl Server {
             stop: my_stop.clone(),
             sock: stream.shutdown_handle().ok(),
             last_rx: last_rx.clone(),
+            client_id,
         });
         self.log
             .info(format!("Client {peer} authenticated; Ethernet tunnel established."));
@@ -901,7 +915,12 @@ fn connect(host: &str, port: u16, stop: &AtomicBool) -> io::Result<TcpStream> {
 }
 
 /// Connects and authenticates; returns the stream and the server address.
-fn connect_and_auth(cfg: &ClientConfig, stop: &AtomicBool, log: &Logger) -> io::Result<(SecureStream, SocketAddr)> {
+fn connect_and_auth(
+    cfg: &ClientConfig,
+    client_id: &proto::ClientId,
+    stop: &AtomicBool,
+    log: &Logger,
+) -> io::Result<(SecureStream, SocketAddr)> {
     log.info(format!("Connecting to {}:{}...", cfg.host, cfg.port));
     let tcp = connect(&cfg.host, cfg.port, stop)?;
     let peer = tcp.peer_addr()?;
@@ -909,7 +928,7 @@ fn connect_and_auth(cfg: &ClientConfig, stop: &AtomicBool, log: &Logger) -> io::
     let killer = tcp.try_clone()?;
     let password = cfg.secure.then(|| secure::normalize_password(&cfg.password));
     let stream = with_deadline(&killer, HANDSHAKE_TIMEOUT, || {
-        secure::client_handshake(tcp, password.as_deref())
+        secure::client_handshake(tcp, password.as_deref(), client_id)
     })?;
     if cfg.secure {
         log.info(format!(
@@ -939,6 +958,7 @@ fn sleep_unless_stopped(d: Duration, stop: &AtomicBool) -> bool {
 /// `Some(Err)` = an error a retry cannot fix (wrong password, Secure mismatch).
 fn retry_connect(
     cfg: &ClientConfig,
+    client_id: &proto::ClientId,
     stop: &AtomicBool,
     log: &Logger,
     reason: &str,
@@ -957,7 +977,7 @@ fn retry_connect(
             return None;
         }
         log.status(format!("Connecting (attempt {attempt})..."));
-        match connect_and_auth(cfg, stop, log) {
+        match connect_and_auth(cfg, client_id, stop, log) {
             Ok(s) => return Some(Ok(s)),
             Err(e) if secure::is_fatal_handshake_error(&e) => return Some(Err(e)),
             Err(_) if stop.load(Ordering::SeqCst) => return None,
@@ -973,9 +993,12 @@ fn client_main(
     log: &Logger,
 ) -> io::Result<()> {
     log.status("Connecting...");
+    // One id for this whole connection, reused by every reconnect, so the server lets this
+    // client replace its own dead connection without waiting (see Server::handle).
+    let client_id = secure::new_client_id();
     // Keep trying until the server is reachable (it may not be sharing yet, the network may be
     // down for a moment); only wrong password / Secure mismatch, or Disconnect, end this.
-    let (mut stream, mut peer) = match retry_connect(cfg, stop, log, "Server unreachable") {
+    let (mut stream, mut peer) = match retry_connect(cfg, &client_id, stop, log, "Server unreachable") {
         Some(Ok(s)) => s,
         Some(Err(e)) => return Err(e),
         None => return Ok(()),
@@ -1027,7 +1050,7 @@ fn client_main(
             End::Adapter(e) => break Err(io::Error::other(format!("virtual adapter error: {e}"))),
             End::Peer(e) => log.warn(format!("Connection lost: {e}")),
         }
-        match retry_connect(cfg, stop, log, "Connection lost") {
+        match retry_connect(cfg, &client_id, stop, log, "Connection lost") {
             None => {
                 log.info("Disconnected.");
                 break Ok(());
@@ -1073,7 +1096,8 @@ mod tests {
                 ServerHandshake::WrongPassword => unreachable!(),
             }
         });
-        let client = secure::client_handshake(TcpStream::connect(addr).unwrap(), None).unwrap();
+        let client =
+            secure::client_handshake(TcpStream::connect(addr).unwrap(), None, &secure::new_client_id()).unwrap();
         (server.join().unwrap(), client)
     }
 
@@ -1186,6 +1210,10 @@ mod tests {
 
     impl TestServer {
         fn start() -> TestServer {
+            TestServer::start_with(true)
+        }
+
+        fn start_with(secure: bool) -> TestServer {
             let (log, rx) = Logger::new(None);
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let addr = listener.local_addr().unwrap();
@@ -1200,7 +1228,7 @@ mod tests {
             .unwrap();
             let server = Arc::new(Server {
                 identity: ServerIdentity::generate().unwrap(),
-                secure: true,
+                secure,
                 password: Arc::new(Mutex::new(password.clone())),
                 port: Arc::new(port),
                 stop: stop.clone(),
@@ -1261,12 +1289,17 @@ mod tests {
         Ok(s.into())
     }
 
-    /// Authenticates from `src` with `password`, like the real client does.
+    /// Authenticates from `src` with `password` as a new client (fresh id).
     fn handshake_from(src: &str, addr: SocketAddr, password: &str) -> io::Result<SecureStream> {
+        handshake_as(src, addr, password, &secure::new_client_id())
+    }
+
+    /// Authenticates like the real client does, with a given client id.
+    fn handshake_as(src: &str, addr: SocketAddr, password: &str, id: &proto::ClientId) -> io::Result<SecureStream> {
         let tcp = connect_from(src, addr)?;
         configure_socket(&tcp)?;
         tcp.set_read_timeout(Some(Duration::from_secs(5)))?;
-        secure::client_handshake(tcp, Some(password))
+        secure::client_handshake(tcp, Some(password), id)
     }
 
     struct TestClient {
@@ -1279,7 +1312,11 @@ mod tests {
 
     impl TestClient {
         fn connect(srv: &TestServer) -> TestClient {
-            let stream = handshake_from("127.0.0.1", srv.addr, &srv.password).expect("client handshake");
+            TestClient::connect_as(srv, &secure::new_client_id())
+        }
+
+        fn connect_as(srv: &TestServer, id: &proto::ClientId) -> TestClient {
+            let stream = handshake_as("127.0.0.1", srv.addr, &srv.password, id).expect("client handshake");
             let cut = stream.shutdown_handle().unwrap();
             let received = Arc::new(AtomicU64::new(0));
             let stop = Arc::new(AtomicBool::new(false));
@@ -1429,5 +1466,48 @@ mod tests {
             started.elapsed()
         );
         assert!(matches!(second.disconnect(), End::Stopped));
+    }
+
+    #[test]
+    fn same_client_takes_over_its_live_looking_session_at_once() {
+        // The client's network changed: its side failed and it reconnects, while the server
+        // still sees the old connection as alive (no FIN/RST arrived). Here the old session is
+        // even still running, the harshest form of that.
+        let srv = TestServer::start();
+        let id = secure::new_client_id();
+        let old = TestClient::connect_as(&srv, &id);
+        let old_session = srv.session_id();
+        let started = Instant::now();
+        let new = TestClient::connect_as(&srv, &id);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "takeover took {:?}",
+            started.elapsed()
+        );
+        assert_ne!(srv.session_id(), old_session, "the old session was not replaced");
+        // The old connection is ended by the server (with Close), the new one carries traffic.
+        assert!(matches!(old.thread.join().unwrap(), End::PeerClosed | End::Peer(_)));
+        new.assert_flowing("after the takeover");
+        assert!(srv.log_lines().iter().any(|l| l.contains("the client reconnected")));
+        assert!(matches!(new.disconnect(), End::Stopped));
+    }
+
+    #[test]
+    fn other_protocol_version_is_told_to_update() {
+        // A client speaking another protocol version gets a clear, final answer instead of a
+        // hang or a reset, so it stops retrying.
+        use std::io::Write;
+        let srv = TestServer::start_with(false);
+        let mut tcp = connect_from("127.0.0.1", srv.addr).unwrap();
+        tcp.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let other = proto::VERSION + 1;
+        tcp.write_all(&[&b"EETHR-P1"[..], &other.to_be_bytes()].concat())
+            .unwrap();
+        let e = proto::read_hello(&mut tcp, proto::MAGIC_SERVER).unwrap_err();
+        assert!(
+            e.to_string().contains(&format!("Unsupported protocol version {other}")),
+            "unexpected: {e}"
+        );
+        assert!(secure::is_fatal_handshake_error(&e));
     }
 }

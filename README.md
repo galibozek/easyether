@@ -95,8 +95,12 @@ Wayland does not let a program hide or raise its own window, so it stays in the 
 
 Frames are batched (up to 256 per message) over one TCP connection with `TCP_NODELAY`, keepalives
 every 2 s and a 15 s dead-link timeout (also enforced with `TCP_USER_TIMEOUT` / `TCP_MAXRT`).
-After a loss the client reconnects (0, 1, 2, 5, 10 s back-off); a client that was intentionally
-disconnected (server pressed Stop or generated a new password) is told so and does not retry.
+After a loss the client reconnects (0, 1, 2, 5, 10 s back-off) and the server lets it replace its
+own previous connection at once, even if the server has not noticed yet that the old one is dead
+(e.g. the client's network changed). A client that was intentionally disconnected (server pressed
+Stop or generated a new password) is told so and does not retry. Client and server must speak the
+same protocol version (0.5.0 and later are not compatible with 0.4.0 and earlier); a mismatched
+side is told to update.
 
 **Limitation (by design, same as SoftEther's local bridge):** through a physical adapter the
 sharing computer *itself* is not reachable from the client, only the devices behind the cable
@@ -111,7 +115,9 @@ are. On Linux, sharing a bridge interface lifts this limitation.
 - Server-side limits: 10 s handshake deadline, at most 8 concurrent handshakes (2 per IP),
   10-minute block after 5 wrong passwords from one IP, rate-limited logging of probes.
 - A connected client is never displaced by a newcomer who knows the password; only a session whose
-  peer has been silent for the dead-link timeout can be replaced.
+  peer has been silent for the dead-link timeout can be replaced. The one exception is the same
+  client reconnecting: it proves this with a random id sent inside TLS after the password check,
+  so nobody else can use it.
 - *Insecure* mode (both sides must enable it) sends plain TCP: anyone who can reach the port can
   join the shared network. Use it only on trusted LANs.
 

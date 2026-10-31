@@ -3,6 +3,8 @@
 //! Insecure mode (plain TCP, no password):
 //!   C -> S  hello   "EETHR-P1" u16 version
 //!   S -> C  hello   "EETHR-S1" u16 version          | error
+//!   C -> S  id      16 bytes client id
+//!   S -> C  "EETHR-OK"                              | error
 //!
 //! Secure mode handshake (inside TLS):
 //!   C -> S  hello   "EETHR-C1" u16 version
@@ -10,9 +12,15 @@
 //!   C -> S  spake   u16 len, bytes
 //!   S -> C  spake   u16 len, bytes
 //!   C -> S  confirm 32 bytes HMAC(key, "client" || cert fingerprint)
+//!   C -> S  id      16 bytes client id
 //!   S -> C  "EETHR-OK" + 32 bytes HMAC(key, "server" || cert fingerprint) | error
 //!
 //! error  = "EETHR-ER" u16 len, UTF-8 message
+//!
+//! Both sides must speak the same version; anything else is refused with an error asking to
+//! update. The client id is random per client run and stays the same across its reconnects:
+//! it lets the same client take over its own previous connection at once when that one looks
+//! alive to the server but is dead (see tunnel.rs), while anyone else is still refused.
 //!
 //! After the handshake both sides exchange frame batches:
 //!   u32 payload_len | u16 count (0..=256) | count * [u16 len | frame]
@@ -27,7 +35,12 @@ pub const MAGIC_CLIENT_PLAIN: &[u8; 8] = b"EETHR-P1";
 pub const MAGIC_SERVER: &[u8; 8] = b"EETHR-S1";
 pub const MAGIC_OK: &[u8; 8] = b"EETHR-OK";
 pub const MAGIC_ERROR: &[u8; 8] = b"EETHR-ER";
-pub const VERSION: u16 = 1;
+/// Protocol version; both sides must match. 2 added the client id (EasyEther 0.5.0), so an
+/// older peer is refused with a clear "please update" instead of hanging in the handshake.
+pub const VERSION: u16 = 2;
+
+/// Identifies one client run across its reconnects.
+pub type ClientId = [u8; 16];
 
 pub const MIN_FRAME: usize = 14;
 pub const MAX_FRAME: usize = 1600;
