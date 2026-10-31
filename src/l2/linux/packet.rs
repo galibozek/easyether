@@ -291,13 +291,14 @@ impl PacketPort {
         Ok(n)
     }
 
-    /// Sends up to `MAX_BATCH` frames with as few `sendmmsg` calls as possible. A frame the
-    /// kernel refuses is skipped and the rest still goes out.
+    /// Sends at most `MAX_BATCH` frames (the caller chunks) with as few `sendmmsg` calls as
+    /// possible. A frame the kernel refuses is skipped and the rest still goes out.
     fn send_batch(&self, frames: &[Vec<u8>]) -> io::Result<()> {
+        debug_assert!(frames.len() <= MAX_BATCH);
         let mut guard = self.tx.lock().unwrap();
         let b = &mut *guard;
-        let n = frames.len().min(MAX_BATCH);
-        b.prepare(&frames[..n]);
+        let n = frames.len();
+        b.prepare(frames);
         let mut i = 0;
         while i < n {
             // SAFETY: msgs[i..n] were just prepared and point into `frames` and `b.pads`, both
