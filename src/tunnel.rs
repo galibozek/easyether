@@ -323,8 +323,8 @@ fn run_session(
                         .filter(|_| counters.last_ping.load(Ordering::Relaxed) != 0)
                         .map(|t| t.elapsed());
                     let rtt = shown_rtt(counters.rtt_us.load(Ordering::Relaxed), waiting);
-                    // Compared at 0.1 ms, the precision shown.
-                    let shown = (rates, rtt.map(|d| d.as_micros() as u64 / 100));
+                    // Compared at 1 ms, the precision shown.
+                    let shown = (rates, rtt.map(|d| d.as_millis() as u64));
                     if shown != last_shown {
                         log.traffic(rates.0, rates.1, rtt);
                         last_shown = shown;
