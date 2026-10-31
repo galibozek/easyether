@@ -287,55 +287,28 @@ fn run_session(
     let base = Instant::now();
     port.drain();
 
-    // Device -> peer, plus keepalives.
+    // Device -> peer, plus keepalives and pings.
     let tx = {
-        let (stream, port, done, stop, counters, log) = (
+        let (stream, port, done, stop, counters) = (
             stream.clone(),
             port.clone(),
             done.clone(),
             stop.clone(),
             counters.clone(),
-            log.clone(),
         );
         std::thread::spawn(move || -> End {
             let mut frames = Vec::new();
             let mut buf = Vec::new();
             let mut last_send = Instant::now();
-            let (mut last_report, mut prev_tx, mut prev_rx) = (Instant::now(), 0u64, 0u64);
-            let mut last_shown = ((0u64, 0u64), None::<u64>);
-            // When our latest ping was sent.
-            let mut ping_sent: Option<Instant> = None;
+            let mut last_ping = Instant::now();
             let end = loop {
-                // Throughput and latency for the GUI, once a second (only sent when they
-                // change, so an idle GUI is not repainted for nothing), and the next ping.
-                let elapsed = last_report.elapsed();
-                if elapsed >= Duration::from_secs(1) {
-                    let (tx_b, rx_b) = (
-                        counters.tx_bytes.load(Ordering::Relaxed),
-                        counters.rx_bytes.load(Ordering::Relaxed),
-                    );
-                    let secs = elapsed.as_secs_f64();
-                    let rates = (
-                        ((rx_b - prev_rx) as f64 / secs) as u64,
-                        ((tx_b - prev_tx) as f64 / secs) as u64,
-                    );
-                    let waiting = ping_sent
-                        .filter(|_| counters.last_ping.load(Ordering::Relaxed) != 0)
-                        .map(|t| t.elapsed());
-                    let rtt = shown_rtt(counters.rtt_us.load(Ordering::Relaxed), waiting);
-                    // Compared at 1 ms, the precision shown.
-                    let shown = (rates, rtt.map(|d| d.as_millis() as u64));
-                    if shown != last_shown {
-                        log.traffic(rates.0, rates.1, rtt);
-                        last_shown = shown;
-                    }
-                    (last_report, prev_tx, prev_rx) = (Instant::now(), tx_b, rx_b);
-
+                // A ping once a second, for the latency shown by the reporter.
+                if last_ping.elapsed() >= Duration::from_secs(1) {
+                    last_ping = Instant::now();
                     let token = (base.elapsed().as_nanos() as u64).max(1);
                     counters.last_ping.store(token, Ordering::Relaxed);
                     proto::encode_ping(token, &mut buf);
                     counters.tx_bytes.fetch_add(buf.len() as u64, Ordering::Relaxed);
-                    ping_sent = Some(Instant::now());
                     if let Err(e) = stream.send(&buf) {
                         break End::Peer(e.to_string());
                     }
@@ -400,6 +373,45 @@ fn run_session(
         })
     };
 
+    // Throughput and latency for the GUI, once a second, only sent when they change (so an
+    // idle GUI is not repainted for nothing). A thread of its own: the sender can sit in a
+    // blocked write for seconds when the link stalls, and that is exactly when the growing
+    // latency and the dropping rates should show.
+    let reporter = {
+        let (done, counters, log) = (done.clone(), counters.clone(), log.clone());
+        std::thread::spawn(move || {
+            let (mut last_report, mut prev_tx, mut prev_rx) = (Instant::now(), 0u64, 0u64);
+            let mut last_shown = ((0u64, 0u64), None::<u64>);
+            while !done.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(100));
+                let elapsed = last_report.elapsed();
+                if elapsed < Duration::from_secs(1) {
+                    continue;
+                }
+                let (tx_b, rx_b) = (
+                    counters.tx_bytes.load(Ordering::Relaxed),
+                    counters.rx_bytes.load(Ordering::Relaxed),
+                );
+                let secs = elapsed.as_secs_f64();
+                let rates = (
+                    ((rx_b - prev_rx) as f64 / secs) as u64,
+                    ((tx_b - prev_tx) as f64 / secs) as u64,
+                );
+                // The token of an unanswered ping is when it was sent.
+                let token = counters.last_ping.load(Ordering::Relaxed);
+                let waiting = (token != 0).then(|| base.elapsed().saturating_sub(Duration::from_nanos(token)));
+                let rtt = shown_rtt(counters.rtt_us.load(Ordering::Relaxed), waiting);
+                // Compared at 1 ms, the precision shown.
+                let shown = (rates, rtt.map(|d| d.as_millis() as u64));
+                if shown != last_shown {
+                    log.traffic(rates.0, rates.1, rtt);
+                    last_shown = shown;
+                }
+                (last_report, prev_tx, prev_rx) = (Instant::now(), tx_b, rx_b);
+            }
+        })
+    };
+
     // Peer -> device on this thread.
     let mut dec = BatchDecoder::default();
     let mut frames = Vec::new();
@@ -458,6 +470,8 @@ fn run_session(
     done.store(true, Ordering::SeqCst);
     stream.shutdown();
     let tx_end = tx.join().unwrap_or(End::Peer("sender thread panicked".into()));
+    // Joined first, so no late report follows the reset.
+    let _ = reporter.join();
     log.traffic(0, 0, None);
 
     log.info(format!(
