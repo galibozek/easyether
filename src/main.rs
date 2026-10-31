@@ -103,8 +103,8 @@ fn run_gui() {
     };
     let mut viewport = eframe::egui::ViewportBuilder::default()
         .with_title("EasyEther")
-        .with_inner_size([800.0, 620.0])
-        .with_min_inner_size([800.0, 620.0]);
+        .with_inner_size([800.0, 600.0])
+        .with_min_inner_size([800.0, 600.0]);
     if let Some(rgba) = logo::rgba(256) {
         viewport = viewport.with_icon(Arc::new(eframe::egui::IconData {
             rgba: rgba.to_vec(),
