@@ -260,7 +260,7 @@ const LINK_REPORT: Duration = Duration::from_secs(30);
 /// Whether that report is written (`--link-log`).
 pub static LINK_LOG: AtomicBool = AtomicBool::new(false);
 /// The shown throughput is the average over this long, so it does not flicker.
-const RATE_WINDOW: Duration = Duration::from_secs(3);
+const RATE_WINDOW: Duration = Duration::from_secs(2);
 /// The shown latency is the median of this many pings (one a second).
 const RTT_SAMPLES: usize = 5;
 
