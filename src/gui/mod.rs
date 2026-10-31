@@ -251,7 +251,7 @@ impl App {
                             egui::FontId::proportional(15.0),
                             text_color,
                         );
-                        // State badge on the right side of the tab: "● Connected · ↓ rx ↑ tx · rtt",
+                        // State badge on the right side of the tab: "● ↓ rx ↑ tx · rtt",
                         // nothing while off. A narrow tab shows its name only.
                         if let Some(badge) = badges[col].as_ref().filter(|_| widths[col] > compact) {
                             let color = if selected {

@@ -98,9 +98,9 @@ impl ServerTab {
         if !self.is_running() {
             None
         } else if self.worker.status.contains("client connected") {
-            Some(Badge::new("Connected", Activity::On).traffic(self.worker.traffic, self.worker.rtt))
+            Some(Badge::new(Activity::On).traffic(self.worker.traffic, self.worker.rtt))
         } else {
-            Some(Badge::new("Waiting for a client", Activity::Pending))
+            Some(Badge::new(Activity::Pending))
         }
     }
 

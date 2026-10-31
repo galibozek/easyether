@@ -56,9 +56,9 @@ impl ClientTab {
         if !self.is_running() {
             None
         } else if self.worker.status.starts_with("Connected") {
-            Some(Badge::new("Connected", Activity::On).traffic(self.worker.traffic, self.worker.rtt))
+            Some(Badge::new(Activity::On).traffic(self.worker.traffic, self.worker.rtt))
         } else {
-            Some(Badge::new("Connecting…", Activity::Pending))
+            Some(Badge::new(Activity::Pending))
         }
     }
 
