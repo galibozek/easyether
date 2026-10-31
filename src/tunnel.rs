@@ -118,6 +118,11 @@ impl TunnelHandle {
     pub fn has_client(&self) -> bool {
         self.active.lock().unwrap().is_some()
     }
+
+    /// Server only: the connected client's address, if any.
+    pub fn client_addr(&self) -> Option<SocketAddr> {
+        self.active.lock().unwrap().as_ref().map(|s| s.peer)
+    }
 }
 
 /// Socket tuning for a link that may stall briefly (Wi-Fi roaming, retransmissions):
@@ -188,6 +193,8 @@ struct ActiveSession {
     last_rx: Arc<Mutex<Instant>>,
     /// The client's id, so that client (and only it) can take its own session over.
     client_id: proto::ClientId,
+    /// Where the client connects from, for the GUI.
+    peer: SocketAddr,
 }
 
 impl ActiveSession {
@@ -862,6 +869,7 @@ impl Server {
             sock: stream.shutdown_handle().ok(),
             last_rx: last_rx.clone(),
             client_id,
+            peer,
         });
         self.log
             .info(format!("Client {peer} authenticated; Ethernet tunnel established."));
@@ -1213,20 +1221,24 @@ mod tests {
         }
     }
 
-    /// A connected (server, client) pair in insecure mode.
+    /// A connected (server, client) pair in insecure mode, with the sockets configured as in
+    /// the real server and client (TCP_NODELAY above all: without it Nagle's algorithm holds
+    /// small messages such as a pong until the previous one is acknowledged).
     fn pair() -> (SecureStream, SecureStream) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
             let id = ServerIdentity::generate().unwrap();
             let (tcp, _) = listener.accept().unwrap();
+            configure_socket(&tcp).unwrap();
             match secure::server_handshake(tcp, &id, None).unwrap() {
                 ServerHandshake::Authenticated(a) => a.accept().unwrap(),
                 ServerHandshake::WrongPassword => unreachable!(),
             }
         });
-        let client =
-            secure::client_handshake(TcpStream::connect(addr).unwrap(), None, &secure::new_client_id()).unwrap();
+        let tcp = TcpStream::connect(addr).unwrap();
+        configure_socket(&tcp).unwrap();
+        let client = secure::client_handshake(tcp, None, &secure::new_client_id()).unwrap();
         (server.join().unwrap(), client)
     }
 

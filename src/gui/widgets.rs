@@ -337,7 +337,9 @@ pub fn theme_switch(ui: &mut egui::Ui, current: &str) -> Option<&'static str> {
 }
 
 /// "Status `<text>`" bar with optional extra content on the right.
-pub fn status_bar(ui: &mut egui::Ui, status: &str, right: impl FnOnce(&mut egui::Ui)) {
+/// Info bar under a tab's controls: `left` and `right` fill its two sides. The tab itself shows
+/// the state, so this bar shows details: who is connected, where to connect, the IP setup.
+pub fn status_bar(ui: &mut egui::Ui, left: impl FnOnce(&mut egui::Ui), right: impl FnOnce(&mut egui::Ui)) {
     let p = pal(ui);
     egui::Frame::new()
         .fill(p.soft)
@@ -346,17 +348,22 @@ pub fn status_bar(ui: &mut egui::Ui, status: &str, right: impl FnOnce(&mut egui:
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Status").color(p.muted));
-                // Right side first so a long status is truncated with "…" instead of overlapping it.
+                // Right side first so a long left text is truncated with "…" instead of
+                // overlapping it.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     right(ui);
-                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        ui.add(egui::Label::new(RichText::new(status).strong().color(p.text)).truncate())
-                            .on_hover_text(status);
-                    });
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), left);
                 });
             });
         });
+}
+
+/// A truncated label (full text on hover), for the left side of the status bar.
+pub fn truncated(ui: &mut egui::Ui, text: impl Into<String>, color: Color32, strong: bool) {
+    let text = text.into();
+    let rich = RichText::new(text.as_str()).color(color);
+    let rich = if strong { rich.strong() } else { rich };
+    ui.add(egui::Label::new(rich).truncate()).on_hover_text(text);
 }
 
 /// Log panel: one read-only text area, so a selection can span many lines while scrolling,
