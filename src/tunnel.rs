@@ -242,10 +242,9 @@ struct Counters {
     /// the sending thread, so the receiving thread never blocks on a send (with both sides'
     /// receivers blocked on full send buffers, neither would read again).
     pending_pong: Mutex<Option<(u64, Instant)>>,
-    /// Token of our latest ping; only its pong counts.
+    /// Token of our latest ping while it is unanswered, 0 once its pong came (or before the
+    /// first); only that pong counts.
     last_ping: AtomicU64,
-    /// Whether the latest ping was answered.
-    ping_answered: AtomicBool,
     /// Last measured round trip in microseconds; 0 while none.
     rtt_us: AtomicU64,
 }
@@ -321,7 +320,7 @@ fn run_session(
                         ((tx_b - prev_tx) as f64 / secs) as u64,
                     );
                     let waiting = ping_sent
-                        .filter(|_| !counters.ping_answered.load(Ordering::Relaxed))
+                        .filter(|_| counters.last_ping.load(Ordering::Relaxed) != 0)
                         .map(|t| t.elapsed());
                     let rtt = shown_rtt(counters.rtt_us.load(Ordering::Relaxed), waiting);
                     // Compared at 0.1 ms, the precision shown.
@@ -334,7 +333,6 @@ fn run_session(
 
                     let token = (base.elapsed().as_nanos() as u64).max(1);
                     counters.last_ping.store(token, Ordering::Relaxed);
-                    counters.ping_answered.store(false, Ordering::Relaxed);
                     proto::encode_ping(token, &mut buf);
                     counters.tx_bytes.fetch_add(buf.len() as u64, Ordering::Relaxed);
                     ping_sent = Some(Instant::now());
@@ -353,14 +351,17 @@ fn run_session(
                     break End::Peer(String::new());
                 }
                 frames.clear();
+                let polling = Instant::now();
                 if let Err(e) = port.recv(&mut frames, POLL) {
                     break End::Adapter(e.to_string());
                 }
-                // Answer the peer's ping. It may have waited here up to one poll interval (or
-                // behind a long send); that wait is reported so the peer can subtract it.
+                // Answer the peer's ping. It may have waited here for the adapter poll, which
+                // frames never do; that wait is reported so the peer can subtract it. Time
+                // spent behind our own sends is not: frames wait there too, so it is latency.
                 let pong = counters.pending_pong.lock().unwrap().take();
                 if let Some((token, arrived)) = pong {
-                    let hold_us = arrived.elapsed().as_micros().min(u32::MAX as u128) as u32;
+                    let hold = arrived.elapsed().min(polling.elapsed());
+                    let hold_us = hold.as_micros().min(u32::MAX as u128) as u32;
                     proto::encode_pong(token, hold_us, &mut buf);
                     counters.tx_bytes.fetch_add(buf.len() as u64, Ordering::Relaxed);
                     if let Err(e) = stream.send(&buf) {
@@ -427,9 +428,13 @@ fn run_session(
                 }
                 Ok(Some(proto::Msg::Pong { token, hold_us })) => {
                     // Only the pong to our latest ping counts; a token that is not ours (or
-                    // would overflow the clock) is ignored.
-                    if token == counters.last_ping.load(Ordering::Relaxed)
-                        && let Some(sent) = base.checked_add(Duration::from_nanos(token))
+                    // would overflow the clock) is ignored. Taking the token in one step means
+                    // a newer ping sent meanwhile stays unanswered.
+                    if let Some(sent) = base.checked_add(Duration::from_nanos(token))
+                        && counters
+                            .last_ping
+                            .compare_exchange(token, 0, Ordering::Relaxed, Ordering::Relaxed)
+                            .is_ok()
                     {
                         let rtt = Instant::now()
                             .saturating_duration_since(sent)
@@ -437,7 +442,6 @@ fn run_session(
                         counters
                             .rtt_us
                             .store((rtt.as_micros() as u64).max(1), Ordering::Relaxed);
-                        counters.ping_answered.store(true, Ordering::Relaxed);
                     }
                 }
                 Ok(Some(proto::Msg::Batch)) if frames.is_empty() => {}
