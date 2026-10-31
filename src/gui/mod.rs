@@ -195,14 +195,24 @@ impl App {
             .inner_margin(egui::Margin::same(4))
             .show(ui, |ui| {
                 let badges = [self.server.badge(), self.client.badge()];
-                ui.columns(2, |cols| {
+                // When exactly one side runs, its tab takes the room (throughput and latency fit)
+                // and the other shrinks to its name, still clickable. Otherwise half each.
+                let running = [self.server.is_running(), self.client.is_running()];
+                let gap = ui.spacing().item_spacing.x;
+                let total = ui.available_width();
+                let compact = 96.0;
+                let widths = match running {
+                    [true, false] => [total - compact - gap, compact],
+                    [false, true] => [compact, total - compact - gap],
+                    _ => [(total - gap) / 2.0; 2],
+                };
+                ui.horizontal(|ui| {
                     for (col, tab, label) in [(0, Tab::Server, "Server"), (1, Tab::Client, "Client")] {
                         let selected = self.tab == tab;
+                        let narrow = widths[col] <= compact;
                         // Drawn by hand (no Button widget): hovering only changes the background,
                         // so the text and badge never move.
-                        let ui = &mut cols[col];
-                        let (rect, resp) =
-                            ui.allocate_exact_size(Vec2::new(ui.available_width(), 34.0), egui::Sense::click());
+                        let (rect, resp) = ui.allocate_exact_size(Vec2::new(widths[col], 34.0), egui::Sense::click());
                         let bg = if selected {
                             ACCENT
                         } else if resp.hovered() {
@@ -219,7 +229,8 @@ impl App {
                             egui::FontId::proportional(15.0),
                             if selected { Color32::WHITE } else { p.muted },
                         );
-                        // State badge on the right side of the tab: "● Connected · ↓ rx ↑ tx", "○ Off", ...
+                        // State badge on the right side of the tab: "● Connected · ↓ rx ↑ tx · rtt",
+                        // "○ Off", ... A narrow tab shows its name only.
                         let badge = &badges[col];
                         let color = if selected && badge.activity == widgets::Activity::Off {
                             Color32::from_white_alpha(200)
@@ -228,15 +239,9 @@ impl App {
                         } else {
                             badge.activity.color(p)
                         };
-                        widgets::paint_badge(
-                            painter,
-                            rect.right() - 12.0,
-                            rect.center().y,
-                            color,
-                            badge.state,
-                            badge.activity,
-                            badge.traffic,
-                        );
+                        if !narrow {
+                            widgets::paint_badge(painter, rect.right() - 12.0, rect.center().y, color, badge);
+                        }
                         if resp.clicked() && !selected {
                             self.tab = tab;
                             self.settings.last_tab = label.to_string();

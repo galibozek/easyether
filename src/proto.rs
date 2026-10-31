@@ -24,8 +24,12 @@
 //!
 //! After the handshake both sides exchange frame batches:
 //!   u32 payload_len | u16 count (0..=256) | count * [u16 len | frame]
-//! A batch with count 0 is a keepalive. Count 0xFFFF (no frames) is "Close": the peer ends the
-//! session on purpose (Stop / Disconnect), so the client does not try to reconnect.
+//! A batch with count 0 is a keepalive. Counts above 256 are control messages:
+//!   0xFFFF                        Close: the peer ends the session on purpose (Stop /
+//!                                 Disconnect), so the client does not try to reconnect.
+//!   0xFFFE u64 token              Ping (version >= 3).
+//!   0xFFFD u64 token u32 hold_us  Pong: the ping's token, and how long the ping waited at this
+//!                                 side before the pong was sent, which the pinger subtracts.
 
 use std::io::{self, Read, Write};
 
@@ -35,9 +39,10 @@ pub const MAGIC_CLIENT_PLAIN: &[u8; 8] = b"EETHR-P1";
 pub const MAGIC_SERVER: &[u8; 8] = b"EETHR-S1";
 pub const MAGIC_OK: &[u8; 8] = b"EETHR-OK";
 pub const MAGIC_ERROR: &[u8; 8] = b"EETHR-ER";
-/// Protocol version; both sides must match. 2 added the client id (EasyEther 0.5.0), so an
-/// older peer is refused with a clear "please update" instead of hanging in the handshake.
-pub const VERSION: u16 = 2;
+/// Protocol version; both sides must match, so an older peer is refused with a clear "please
+/// update" instead of hanging in the handshake or failing on a message it does not know.
+/// 2 added the client id (EasyEther 0.5.0), 3 ping/pong for the latency display (0.6.0).
+pub const VERSION: u16 = 3;
 
 /// Identifies one client run across its reconnects.
 pub type ClientId = [u8; 16];
@@ -48,6 +53,8 @@ pub const MAX_BATCH: usize = 256;
 pub const MAX_PAYLOAD: usize = 2 + MAX_BATCH * (2 + MAX_FRAME);
 const MAX_MESSAGE: usize = 4096;
 const CLOSE_COUNT: u16 = 0xFFFF;
+const PING_COUNT: u16 = 0xFFFE;
+const PONG_COUNT: u16 = 0xFFFD;
 
 /// What `BatchDecoder::next` found.
 #[derive(Debug, PartialEq, Eq)]
@@ -56,6 +63,10 @@ pub enum Msg {
     Batch,
     /// The peer is closing the session on purpose.
     Close,
+    /// The peer asks for a pong with this token.
+    Ping(u64),
+    /// Answer to our ping `token`; it waited `hold_us` at the peer before the pong was sent.
+    Pong { token: u64, hold_us: u32 },
 }
 
 /// The "Close" message.
@@ -63,6 +74,39 @@ pub fn encode_close(out: &mut Vec<u8>) {
     out.clear();
     out.extend_from_slice(&2u32.to_be_bytes());
     out.extend_from_slice(&CLOSE_COUNT.to_be_bytes());
+}
+
+pub fn encode_ping(token: u64, out: &mut Vec<u8>) {
+    out.clear();
+    out.extend_from_slice(&10u32.to_be_bytes());
+    out.extend_from_slice(&PING_COUNT.to_be_bytes());
+    out.extend_from_slice(&token.to_be_bytes());
+}
+
+pub fn encode_pong(token: u64, hold_us: u32, out: &mut Vec<u8>) {
+    out.clear();
+    out.extend_from_slice(&14u32.to_be_bytes());
+    out.extend_from_slice(&PONG_COUNT.to_be_bytes());
+    out.extend_from_slice(&token.to_be_bytes());
+    out.extend_from_slice(&hold_us.to_be_bytes());
+}
+
+/// A control message (count above `MAX_BATCH`), or `None` for a frame batch.
+fn decode_control(payload: &[u8]) -> io::Result<Option<Msg>> {
+    let Some(count) = payload.get(..2).map(|c| u16::from_be_bytes([c[0], c[1]])) else {
+        return Ok(None);
+    };
+    let u64_at = |i: usize| u64::from_be_bytes(payload[i..i + 8].try_into().unwrap());
+    match (count, payload.len()) {
+        (CLOSE_COUNT, 2) => Ok(Some(Msg::Close)),
+        (PING_COUNT, 10) => Ok(Some(Msg::Ping(u64_at(2)))),
+        (PONG_COUNT, 14) => Ok(Some(Msg::Pong {
+            token: u64_at(2),
+            hold_us: u32::from_be_bytes(payload[10..14].try_into().unwrap()),
+        })),
+        (CLOSE_COUNT | PING_COUNT | PONG_COUNT, _) => Err(invalid("malformed control message")),
+        _ => Ok(None),
+    }
 }
 
 fn invalid(msg: impl Into<String>) -> io::Error {
@@ -218,11 +262,12 @@ impl BatchDecoder {
             return Ok(self.compact());
         }
         let payload = &pending[4..4 + len];
-        let msg = if payload == CLOSE_COUNT.to_be_bytes() {
-            Msg::Close
-        } else {
-            decode_payload(payload, frames)?;
-            Msg::Batch
+        let msg = match decode_control(payload)? {
+            Some(msg) => msg,
+            None => {
+                decode_payload(payload, frames)?;
+                Msg::Batch
+            }
         };
         self.pos += 4 + len;
         Ok(Some(msg))
@@ -315,6 +360,30 @@ mod tests {
         let mut got = Vec::new();
         assert_eq!(dec.next(&mut got).unwrap(), Some(Msg::Close));
         assert_eq!(dec.next(&mut got).unwrap(), None);
+    }
+
+    #[test]
+    fn ping_and_pong_round_trip() {
+        let mut out = Vec::new();
+        let mut dec = BatchDecoder::default();
+        encode_ping(0x0102_0304_0506_0708, &mut out);
+        dec.push(&out);
+        encode_pong(42, 1_500, &mut out);
+        dec.push(&out);
+        let mut got = Vec::new();
+        assert_eq!(dec.next(&mut got).unwrap(), Some(Msg::Ping(0x0102_0304_0506_0708)));
+        assert_eq!(
+            dec.next(&mut got).unwrap(),
+            Some(Msg::Pong {
+                token: 42,
+                hold_us: 1_500
+            })
+        );
+        assert!(got.is_empty());
+        // A control code with the wrong length is an error, not a batch.
+        let mut dec = BatchDecoder::default();
+        dec.push(&[0, 0, 0, 4, 0xFF, 0xFE, 0, 0]);
+        assert!(dec.next(&mut got).is_err());
     }
 
     #[test]

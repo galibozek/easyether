@@ -34,7 +34,8 @@ Typical use: a car in the workshop, a diagnostic laptop at home or in another br
   networks (Windows: interface metric 9000 and, where supported, default routes ignored; Linux:
   no gateway, metric 9000), so a gateway on the remote network cannot pull your own traffic
   into the tunnel.
-- **Live status**: throughput per direction on the tabs, detailed log with copy/clear.
+- **Live status**: throughput per direction and latency through the tunnel on the tabs (the
+  active side's tab widens to fit them), detailed log with copy/clear.
 - **IPv4 and IPv6**: the server listens on both; the client accepts host names and IPv4/IPv6
   literals, including link-local with a zone (`fe80::1%eth0`, `fe80::1%12`).
 - **Desktop app**: Windows x64/x86 and Linux (Wayland), light/dark theme, system tray on Windows
@@ -104,8 +105,12 @@ After a loss the client reconnects (0, 1, 2, 5, 10 s back-off) and the server le
 own previous connection at once, even if the server has not noticed yet that the old one is dead
 (e.g. the client's network changed). A client that was intentionally disconnected (server pressed
 Stop or generated a new password) is told so and does not retry. Client and server must speak the
-same protocol version (0.5.0 and later are not compatible with 0.4.0 and earlier); a mismatched
-side is told to update.
+same protocol version (use the same release on both; 0.6 does not talk to 0.5 or earlier); a
+mismatched side is told to update.
+
+Each side pings the other once a second; the round-trip time through the tunnel (network,
+TLS and the tunnel's own queues) is shown next to the throughput, and it grows while a ping is
+unanswered, so a stalled link is visible at once.
 
 **Limitation (by design, same as SoftEther's local bridge):** through a physical adapter the
 sharing computer *itself* is not reachable from the client, only the devices behind the cable

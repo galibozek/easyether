@@ -93,7 +93,7 @@ impl ServerTab {
                 widgets::Badge::new("Off", widgets::Activity::Off)
             }
         } else if self.worker.status.contains("client connected") {
-            widgets::Badge::new("Client connected", widgets::Activity::On).traffic(self.worker.traffic)
+            widgets::Badge::new("Client connected", widgets::Activity::On).traffic(self.worker.traffic, self.worker.rtt)
         } else {
             widgets::Badge::new("Active · waiting for a client", widgets::Activity::On)
         }

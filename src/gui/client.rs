@@ -52,7 +52,7 @@ impl ClientTab {
                 Badge::new("Off", Activity::Off)
             }
         } else if self.worker.status.starts_with("Connected") {
-            Badge::new("Connected", Activity::On).traffic(self.worker.traffic)
+            Badge::new("Connected", Activity::On).traffic(self.worker.traffic, self.worker.rtt)
         } else if self.worker.status.starts_with("Connection lost") {
             Badge::new("Reconnecting…", Activity::Pending)
         } else if self.worker.status.starts_with("Server unreachable") {

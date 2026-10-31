@@ -17,6 +17,8 @@ pub struct Worker {
     pub log: LogView,
     /// Current throughput (rx, tx) in bytes per second.
     pub traffic: (u64, u64),
+    /// Round-trip time through the tunnel, once measured.
+    pub rtt: Option<std::time::Duration>,
 }
 
 impl Worker {
@@ -29,6 +31,7 @@ impl Worker {
             status: status.into(),
             log: LogView::default(),
             traffic: (0, 0),
+            rtt: None,
         }
     }
 
@@ -42,7 +45,7 @@ impl Worker {
             match ev {
                 Event::Log(l) => self.log.push(l),
                 Event::Status(s) => self.status = s,
-                Event::Traffic { rx, tx } => self.traffic = (rx, tx),
+                Event::Traffic { rx, tx, rtt } => (self.traffic, self.rtt) = ((rx, tx), rtt),
             }
         }
         if self.handle.as_ref().is_some_and(|h| h.is_finished()) {
