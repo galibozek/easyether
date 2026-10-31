@@ -18,6 +18,8 @@ pub struct ServerTab {
     local_ip: String,
     /// All IPv4 addresses with their interface names, for the "My address" hover.
     addresses: Vec<(String, std::net::Ipv4Addr)>,
+    /// "Copied to clipboard" after Copy or a click on the address.
+    copied: widgets::Copied,
     #[cfg(windows)]
     installer: Option<std::thread::JoinHandle<()>>,
     #[cfg(windows)]
@@ -49,6 +51,7 @@ impl ServerTab {
             password: secure::generate_password(),
             local_ip: local_ip(),
             addresses: l2::local_ipv4(),
+            copied: widgets::Copied::default(),
             #[cfg(windows)]
             installer: None,
             #[cfg(windows)]
@@ -177,7 +180,7 @@ impl ServerTab {
 
         ui.horizontal(|ui| {
             // Refresh (84) + gap (16) + port (70) + Share/Stop (96) + spacing.
-            let combo_width = (ui.available_width() - 350.0).max(160.0);
+            let combo_width = (ui.available_width() - 320.0).max(160.0);
             ui.vertical(|ui| {
                 widgets::caption(ui, "Network adapter");
                 let current = self
@@ -246,8 +249,9 @@ impl ServerTab {
                         .size(20.0)
                         .strong(),
                 );
-                if widgets::small_button(ui, true, "Copy").clicked() {
-                    ui.ctx().copy_text(self.password.clone());
+                let copy = widgets::small_button(ui, true, "Copy");
+                if copy.clicked() {
+                    self.copied.copy(ui.ctx(), self.password.clone(), Some(&copy));
                 }
                 let new_pw = widgets::small_button(ui, true, "New password")
                     .on_hover_text("A connected client is disconnected, since its password stops being valid.");
@@ -274,7 +278,11 @@ impl ServerTab {
                     .add(egui::Label::new(RichText::new(&address).strong()).sense(egui::Sense::click()))
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .on_hover_ui(|ui| {
-                        ui.label("Click to copy.");
+                        if self.copied.active() {
+                            ui.label(RichText::new("Copied to clipboard").strong());
+                        } else {
+                            ui.label("Click to copy.");
+                        }
                         if !self.addresses.is_empty() {
                             ui.add_space(4.0);
                             widgets::muted(ui, "All addresses of this computer:");
@@ -293,11 +301,12 @@ impl ServerTab {
                         }
                     });
                 if resp.clicked() {
-                    ui.ctx().copy_text(address.clone());
+                    self.copied.copy(ui.ctx(), address.clone(), None);
                 }
                 widgets::caption(ui, "My address");
             });
         });
+        self.copied.ui(ui);
 
         let handle = self.worker.handle.as_ref();
         let client = handle.and_then(|h| h.client_session());
