@@ -403,10 +403,10 @@ pub fn status_bar(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui)) {
         });
 }
 
-/// A truncated label (full text on hover), for the left side of the status bar.
+/// A label cut with "…" when it does not fit, for the status bar (egui shows the full text on
+/// hover only then).
 pub fn truncated(ui: &mut egui::Ui, text: String, color: Color32) {
-    let rich = RichText::new(text.as_str()).color(color);
-    ui.add(egui::Label::new(rich).truncate()).on_hover_text(text);
+    ui.add(egui::Label::new(RichText::new(text).color(color)).truncate());
 }
 
 /// Log panel: one read-only text area, so a selection can span many lines while scrolling,
