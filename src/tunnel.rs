@@ -1008,14 +1008,25 @@ fn client_main(
     let adapter = Arc::new(l2::open_client(cfg.mac, log)?);
     l2::prefer_local_networks(log);
     let ip_guard = Arc::new(Mutex::new(configure_client_ip(cfg.static_ipv4, log)));
+    // Set when the client is closing: a reopen hook still running then must not configure the
+    // adapter again (it runs on its own thread and can outlive this function).
+    let closing = Arc::new(AtomicBool::new(false));
     {
         // A restarted adapter (driver restart, adapter disabled and enabled) comes back without
         // its route priority and addresses: set them up again. The old guard goes first, so a
         // static address is removed and added rather than left twice.
-        let (ip_guard, log, static_ipv4) = (ip_guard.clone(), log.clone(), cfg.static_ipv4);
+        let (ip_guard, closing, log, static_ipv4) = (ip_guard.clone(), closing.clone(), log.clone(), cfg.static_ipv4);
         adapter.set_on_reopen(move || {
+            if closing.load(Ordering::SeqCst) {
+                return;
+            }
             l2::prefer_local_networks(&log);
             let mut guard = ip_guard.lock().unwrap();
+            // Checked again under the lock that the teardown below also takes, so either this
+            // hook configures before the teardown removes it, or it sees the flag and stops.
+            if closing.load(Ordering::SeqCst) {
+                return;
+            }
             *guard = None;
             *guard = configure_client_ip(static_ipv4, &log);
         });
@@ -1053,7 +1064,9 @@ fn client_main(
             }
         }
     };
-    // Remove the IP configuration while the adapter still exists, then close it.
+    // Remove the IP configuration while the adapter still exists, then close it. The flag first,
+    // so a reopen hook still running does not configure it again.
+    closing.store(true, Ordering::SeqCst);
     ip_guard.lock().unwrap().take();
     drop(port);
     drop(adapter);
