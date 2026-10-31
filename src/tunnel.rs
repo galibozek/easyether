@@ -522,7 +522,6 @@ fn server_main(
     l2::prepare_listen(cfg.port, log);
     let listener = listen_dual_stack(cfg.port)
         .map_err(|e| io::Error::new(e.kind(), format!("cannot listen on TCP port {}: {e}", cfg.port)))?;
-    listener.set_nonblocking(true)?;
     if cfg.secure {
         log.info(format!(
             "Listening on TCP port {} (Secure: TLS 1.3 + password, certificate {}...). Waiting for a client.",
@@ -541,7 +540,7 @@ fn server_main(
         secure: cfg.secure,
         password,
         port,
-        stop: stop.clone(),
+        stop,
         log: log.clone(),
         abuse: Mutex::default(),
         handshakes: AtomicUsize::new(0),
@@ -549,6 +548,15 @@ fn server_main(
         active,
         session_slot: Mutex::new(()),
     });
+    serve(listener, server)
+}
+
+/// The accept loop and the graceful stop. Separate from `server_main` (which opens the adapter
+/// and the listener) so tests can run the real server over a stand-in adapter.
+fn serve(listener: TcpListener, server: Arc<Server>) -> io::Result<()> {
+    let stop = server.stop.clone();
+    let log = server.log.clone();
+    listener.set_nonblocking(true)?;
     server.idle_status();
 
     let mut last_idle = Instant::now();
@@ -1124,5 +1132,302 @@ mod tests {
         cut.shutdown(std::net::Shutdown::Both).unwrap();
         assert!(matches!(server.join().unwrap(), End::Peer(_)));
         assert!(matches!(client.join().unwrap(), End::Peer(_)));
+    }
+
+    // --- The real server under hostile traffic -------------------------------------------
+    //
+    // These run the actual accept loop, handshake limits, bans and session takeover rules
+    // over loopback. The car side is a stand-in adapter that emits a frame every few ms; the
+    // client counts what arrives, so "the session survived" means frames kept flowing the
+    // whole time, not just that a thread is still alive. Attackers connect from other
+    // loopback addresses (127.0.0.2 and up), so the per-IP limits apply as on a real network.
+
+    /// The car side: a frame every ~5 ms, counts frames coming from the client.
+    struct TickPort {
+        seq: AtomicU64,
+    }
+
+    impl L2Port for TickPort {
+        fn recv(&self, out: &mut Vec<Vec<u8>>, timeout: Duration) -> io::Result<()> {
+            std::thread::sleep(timeout.min(Duration::from_millis(5)));
+            let n = self.seq.fetch_add(1, Ordering::Relaxed);
+            let mut f = vec![0u8; 60];
+            f[..8].copy_from_slice(&n.to_be_bytes());
+            out.push(f);
+            Ok(())
+        }
+        fn send(&self, _frames: &[Vec<u8>]) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The client's virtual adapter: counts frames delivered from the server.
+    struct CountPort(Arc<AtomicU64>);
+
+    impl L2Port for CountPort {
+        fn recv(&self, _out: &mut Vec<Vec<u8>>, timeout: Duration) -> io::Result<()> {
+            std::thread::sleep(timeout.min(Duration::from_millis(10)));
+            Ok(())
+        }
+        fn send(&self, frames: &[Vec<u8>]) -> io::Result<()> {
+            self.0.fetch_add(frames.len() as u64, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    struct TestServer {
+        addr: SocketAddr,
+        password: String,
+        stop: Arc<AtomicBool>,
+        thread: Option<std::thread::JoinHandle<io::Result<()>>>,
+        active: Arc<Mutex<Option<ActiveSession>>>,
+        log: std::sync::mpsc::Receiver<crate::log::Event>,
+    }
+
+    impl TestServer {
+        fn start() -> TestServer {
+            let (log, rx) = Logger::new(None);
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let password = secure::generate_password();
+            let stop = Arc::new(AtomicBool::new(false));
+            let active: Arc<Mutex<Option<ActiveSession>>> = Arc::default();
+            let port = ResilientPort::open(
+                "test",
+                Box::new(|| Ok(Box::new(TickPort { seq: AtomicU64::new(0) }) as Box<dyn L2Port>)),
+                &log,
+            )
+            .unwrap();
+            let server = Arc::new(Server {
+                identity: ServerIdentity::generate().unwrap(),
+                secure: true,
+                password: Arc::new(Mutex::new(password.clone())),
+                port: Arc::new(port),
+                stop: stop.clone(),
+                log,
+                abuse: Mutex::default(),
+                handshakes: AtomicUsize::new(0),
+                pending: Mutex::default(),
+                active: active.clone(),
+                session_slot: Mutex::new(()),
+            });
+            let thread = std::thread::spawn(move || serve(listener, server));
+            TestServer {
+                addr,
+                password,
+                stop,
+                thread: Some(thread),
+                active,
+                log: rx,
+            }
+        }
+
+        /// Log lines written so far.
+        fn log_lines(&self) -> Vec<String> {
+            self.log
+                .try_iter()
+                .filter_map(|e| match e {
+                    crate::log::Event::Log(l) => Some(l.message),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// Identity of the running session (its stop flag), to tell it was not replaced.
+        fn session_id(&self) -> Option<usize> {
+            self.active
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|s| Arc::as_ptr(&s.stop) as usize)
+        }
+    }
+
+    impl Drop for TestServer {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+            if let Some(t) = self.thread.take() {
+                let _ = t.join();
+            }
+        }
+    }
+
+    /// A TCP connection to `addr` from the loopback source address `src` (e.g. "127.0.0.2").
+    fn connect_from(src: &str, addr: SocketAddr) -> io::Result<TcpStream> {
+        use socket2::{Domain, Socket, Type};
+        let s = Socket::new(Domain::IPV4, Type::STREAM, None)?;
+        s.bind(&SocketAddr::new(src.parse().unwrap(), 0).into())?;
+        s.connect_timeout(&addr.into(), Duration::from_secs(2))?;
+        Ok(s.into())
+    }
+
+    /// Authenticates from `src` with `password`, like the real client does.
+    fn handshake_from(src: &str, addr: SocketAddr, password: &str) -> io::Result<SecureStream> {
+        let tcp = connect_from(src, addr)?;
+        configure_socket(&tcp)?;
+        tcp.set_read_timeout(Some(Duration::from_secs(5)))?;
+        secure::client_handshake(tcp, Some(password))
+    }
+
+    struct TestClient {
+        received: Arc<AtomicU64>,
+        stop: Arc<AtomicBool>,
+        /// Cuts the connection like a dead link (no Close message).
+        cut: TcpStream,
+        thread: std::thread::JoinHandle<End>,
+    }
+
+    impl TestClient {
+        fn connect(srv: &TestServer) -> TestClient {
+            let stream = handshake_from("127.0.0.1", srv.addr, &srv.password).expect("client handshake");
+            let cut = stream.shutdown_handle().unwrap();
+            let received = Arc::new(AtomicU64::new(0));
+            let stop = Arc::new(AtomicBool::new(false));
+            let thread = {
+                let (port, stop) = (Arc::new(CountPort(received.clone())), stop.clone());
+                std::thread::spawn(move || run_session(stream, port, &stop, None, &Logger::new(None).0))
+            };
+            let c = TestClient {
+                received,
+                stop,
+                cut,
+                thread,
+            };
+            c.assert_flowing("after connecting");
+            c
+        }
+
+        /// Frames from the car keep arriving.
+        fn assert_flowing(&self, when: &str) {
+            let before = self.received.load(Ordering::Relaxed);
+            std::thread::sleep(Duration::from_millis(300));
+            let after = self.received.load(Ordering::Relaxed);
+            assert!(
+                after > before + 10,
+                "traffic stalled {when}: {before} -> {after} frames"
+            );
+            assert!(!self.thread.is_finished(), "session ended {when}");
+        }
+
+        fn disconnect(self) -> End {
+            self.stop.store(true, Ordering::SeqCst);
+            self.thread.join().unwrap()
+        }
+    }
+
+    /// Runs `attack` on several threads while checking every 300 ms that traffic still flows.
+    fn under_attack(client: &TestClient, attackers: Vec<Box<dyn FnOnce() + Send>>) {
+        let handles: Vec<_> = attackers.into_iter().map(std::thread::spawn).collect();
+        while !handles.iter().all(|h| h.is_finished()) {
+            client.assert_flowing("during the attack");
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        client.assert_flowing("after the attack");
+    }
+
+    #[test]
+    fn session_survives_port_scans_and_garbage() {
+        let srv = TestServer::start();
+        let client = TestClient::connect(&srv);
+        let session = srv.session_id();
+        let addr = srv.addr;
+        let send_and_close = move |src: &'static str, payload: Vec<u8>| {
+            move || {
+                for _ in 0..10 {
+                    if let Ok(mut s) = connect_from(src, addr) {
+                        use std::io::Write;
+                        let _ = s.write_all(&payload);
+                    }
+                }
+            }
+        };
+        let attackers: Vec<Box<dyn FnOnce() + Send>> = vec![
+            // Port scan: connect and drop at once.
+            Box::new(send_and_close("127.0.0.2", Vec::new())),
+            // HTTP probe.
+            Box::new(send_and_close(
+                "127.0.0.3",
+                b"GET / HTTP/1.1\r\nHost: x\r\n\r\n".to_vec(),
+            )),
+            // Random bytes, and bytes that look like a TLS record but are not.
+            Box::new(send_and_close(
+                "127.0.0.4",
+                (0..4096u32).map(|i| (i * 7919) as u8).collect(),
+            )),
+            Box::new(send_and_close(
+                "127.0.0.5",
+                [&[0x16, 0x03, 0x01, 0xff, 0xff][..], &[0xAB; 600]].concat(),
+            )),
+            // Plain-mode hello against a Secure server, and a bogus magic.
+            Box::new(send_and_close("127.0.0.6", b"EETHR-P1\x00\x01".to_vec())),
+            Box::new(send_and_close("127.0.0.7", b"EETHR-XX\x00\x01junk".to_vec())),
+            // Slow connections holding every handshake slot for a while, from several IPs.
+            Box::new(move || {
+                let held: Vec<_> = (10..16)
+                    .flat_map(|i| (0..3).map(move |_| i))
+                    .filter_map(|i| connect_from(&format!("127.0.0.{i}"), addr).ok())
+                    .collect();
+                std::thread::sleep(Duration::from_millis(1500));
+                drop(held);
+            }),
+        ];
+        under_attack(&client, attackers);
+        assert_eq!(srv.session_id(), session, "the session was replaced");
+        assert!(matches!(client.disconnect(), End::Stopped));
+    }
+
+    #[test]
+    fn wrong_passwords_and_a_second_client_cannot_take_over() {
+        let srv = TestServer::start();
+        let client = TestClient::connect(&srv);
+        let session = srv.session_id();
+        let (addr, password) = (srv.addr, srv.password.clone());
+        let attackers: Vec<Box<dyn FnOnce() + Send>> = vec![
+            // Guessing: banned after 5 tries, later attempts are dropped.
+            Box::new(move || {
+                for _ in 0..8 {
+                    assert!(handshake_from("127.0.0.2", addr, "aaaaaaaa").is_err());
+                }
+            }),
+            // Someone else who knows the password: refused while the client is active.
+            Box::new(move || {
+                for _ in 0..3 {
+                    let e = handshake_from("127.0.0.3", addr, &password)
+                        .err()
+                        .expect("second client accepted");
+                    assert!(e.to_string().contains("already has a client"), "unexpected: {e}");
+                    assert!(!secure::is_fatal_handshake_error(&e));
+                }
+            }),
+        ];
+        under_attack(&client, attackers);
+        assert_eq!(srv.session_id(), session, "the session was replaced");
+        let log = srv.log_lines();
+        assert!(
+            log.iter().any(|l| l.contains("127.0.0.2 blocked")),
+            "no ban logged: {log:?}"
+        );
+        assert!(!log.iter().any(|l| l.contains("127.0.0.1 blocked")));
+        assert!(matches!(client.disconnect(), End::Stopped));
+    }
+
+    #[test]
+    fn client_reconnects_at_once_after_its_link_was_cut() {
+        let srv = TestServer::start();
+        let first = TestClient::connect(&srv);
+        // A broken link the server notices (reset / FIN): no Close message is sent, so the
+        // client treats it as a loss and reconnects, and the server must free the slot for it.
+        first.cut.shutdown(std::net::Shutdown::Both).unwrap();
+        let started = Instant::now();
+        assert!(matches!(first.thread.join().unwrap(), End::Peer(_)));
+        let second = TestClient::connect(&srv);
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "reconnect took {:?}",
+            started.elapsed()
+        );
+        assert!(matches!(second.disconnect(), End::Stopped));
     }
 }
