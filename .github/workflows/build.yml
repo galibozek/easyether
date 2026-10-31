@@ -75,5 +75,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
-          gh release create "$TAG" dist/* --draft --verify-tag --title "EasyEther ${TAG#v}" --notes ""
+          gh release create "$TAG" dist/* --draft --verify-tag --title "$TAG" --notes ""
           gh release edit "$TAG" --draft=false --latest
