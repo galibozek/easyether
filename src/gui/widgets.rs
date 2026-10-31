@@ -90,17 +90,17 @@ pub fn style(ctx: &egui::Context) {
 }
 
 /// What a tab shows about its side of the tunnel.
+/// A running side's tab badge: a dot in the state's color, then download, upload and latency,
+/// each "-" until known (waiting for a client, connecting).
 pub struct Badge {
-    pub state: &'static str,
     pub activity: Activity,
     pub traffic: Option<(u64, u64)>,
     pub rtt: Option<std::time::Duration>,
 }
 
 impl Badge {
-    pub fn new(state: &'static str, activity: Activity) -> Badge {
+    pub fn new(activity: Activity) -> Badge {
         Badge {
-            state,
             activity,
             traffic: None,
             rtt: None,
@@ -141,7 +141,8 @@ fn paint_arrow(painter: &egui::Painter, right: f32, y: f32, color: Color32, up: 
     right - w
 }
 
-/// Tab badge, right-aligned at (`right`, `y`): `● State · ↓ rx ↑ tx · rtt`.
+/// Tab badge, right-aligned at (`right`, `y`): `● ↓ rx ↑ tx · rtt`, with "-" for what is not
+/// known yet.
 pub fn paint_badge(painter: &egui::Painter, right: f32, y: f32, color: Color32, badge: &Badge) {
     let font = egui::FontId::proportional(12.5);
     let text_right = |x: f32, s: &str| -> f32 {
@@ -149,20 +150,21 @@ pub fn paint_badge(painter: &egui::Painter, right: f32, y: f32, color: Color32, 
             .text(egui::pos2(x, y), egui::Align2::RIGHT_CENTER, s, font.clone(), color)
             .left()
     };
+    // Each value has a fixed slot and is right-aligned in it, so the arrows and dots never move:
+    // not when the numbers change ("0 B/s" vs "123.4 KB/s"), and not when a waiting "-" turns
+    // into a number. Sized for the widest values: "999.99 MB/s" and "999 ms".
+    const RATE_SLOT: f32 = 72.0;
+    const RTT_SLOT: f32 = 46.0;
+    let rate = |v: Option<u64>| v.map_or_else(|| "-".to_string(), crate::log::format_rate);
+    let rtt = badge.rtt.map_or_else(|| "-".to_string(), crate::log::format_rtt);
     let mut x = right;
-    if let Some(rtt) = badge.rtt {
-        x = text_right(x, &crate::log::format_rtt(rtt)) - 6.0;
-        x = text_right(x, "·") - 6.0;
-    }
-    if let Some((rx, tx)) = badge.traffic {
-        x = text_right(x, &crate::log::format_rate(tx)) - 3.0;
-        x = paint_arrow(painter, x, y, color, true) - 7.0;
-        x = text_right(x, &crate::log::format_rate(rx)) - 3.0;
-        x = paint_arrow(painter, x, y, color, false) - 6.0;
-        x = text_right(x, "·") - 6.0;
-    }
-    let left = text_right(x, badge.state);
-    paint_dot(painter, egui::pos2(left - 9.0, y), color, true);
+    text_right(x, &rtt);
+    x = text_right(x - RTT_SLOT - 6.0, "·") - 6.0;
+    text_right(x, &rate(badge.traffic.map(|t| t.1)));
+    x = paint_arrow(painter, x - RATE_SLOT - 3.0, y, color, true) - 7.0;
+    text_right(x, &rate(badge.traffic.map(|t| t.0)));
+    x = paint_arrow(painter, x - RATE_SLOT - 3.0, y, color, false);
+    paint_dot(painter, egui::pos2(x - 9.0, y), color, true);
 }
 
 /// Status dot drawn with shapes (independent of emoji fonts): filled when active, ring when off.
