@@ -139,14 +139,19 @@ fn check(port: u16, exe: &Path, log: &Logger) {
     // Block rules win over allow rules. The ones a cancelled firewall prompt leaves for exactly
     // this program are removed: the prompt names them after the file ("easyether.exe", the
     // program has no version resource). Anything else, a rule someone made on purpose
-    // included, is only reported.
+    // included, is only reported. So is a prompt rule with an "Allow" twin of the same name
+    // (allowed on one profile, cancelled on another): netsh deletes by name, not by action,
+    // and would take the allow rules with it.
     let file_name = exe
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     for r in local.iter().filter(|r| r.blocks(port, &exe_str, env)) {
         let from_prompt = r.app().is_some() && !file_name.is_empty() && r.name().eq_ignore_ascii_case(&file_name);
-        if from_prompt && remove_block_rule(r.name(), exe).is_ok() {
+        let allow_twin = local
+            .iter()
+            .any(|a| a.name().eq_ignore_ascii_case(r.name()) && a.allows(port, &exe_str, env));
+        if from_prompt && !allow_twin && remove_block_rule(r.name(), exe).is_ok() {
             log.info(format!(
                 "Windows Firewall: removed inbound rule '{}' that blocked EasyEther (usually left by a cancelled firewall prompt).",
                 r.name()

@@ -240,7 +240,9 @@ impl ClientTab {
             // the message, the warning color for problems.
             widgets::muted(ui, "Status");
             let (text, color) = if let Some(since) = link.since {
-                let mut text = format!("connected to {server} · {}", crate::log::format_uptime(since.elapsed()));
+                // The resolved address (a host name typed above may stand for several).
+                let peer = link.peer.map_or_else(|| server.clone(), |p| p.to_string());
+                let mut text = format!("connected to {peer} · {}", crate::log::format_uptime(since.elapsed()));
                 match link.reconnects {
                     0 => {}
                     1 => text.push_str(" · 1 reconnect"),

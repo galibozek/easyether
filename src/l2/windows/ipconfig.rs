@@ -47,15 +47,15 @@ fn neo_luid() -> io::Result<NET_LUID_LH> {
     Ok(luid)
 }
 
-/// Usable IPv4 addresses of all adapters but loopback, with the adapter's name.
-pub fn local_ipv4() -> Vec<(String, Ipv4Addr)> {
+/// Every usable IPv4 address (duplicate detection finished) with its adapter's LUID.
+fn unicast_ipv4() -> Vec<(NET_LUID_LH, Ipv4Addr)> {
     let mut table: *mut ffi::MIB_UNICASTIPADDRESS_TABLE = std::ptr::null_mut();
     // SAFETY: on success the table is allocated by IP Helper and freed below.
     if unsafe { ffi::GetUnicastIpAddressTable(AF_INET, &mut table) } != 0 {
         return Vec::new();
     }
     // SAFETY: the table holds NumEntries rows; the union fields read match AF_INET rows.
-    let rows: Vec<(NET_LUID_LH, Ipv4Addr)> = unsafe {
+    let rows = unsafe {
         std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize)
             .iter()
             .filter(|r| r.DadState == IpDadStatePreferred)
@@ -65,13 +65,18 @@ pub fn local_ipv4() -> Vec<(String, Ipv4Addr)> {
                     Ipv4Addr::from(r.Address.Ipv4.sin_addr.S_un.S_addr.to_ne_bytes()),
                 )
             })
-            .filter(|(_, a)| !a.is_loopback())
             .collect()
     };
     // SAFETY: allocated by GetUnicastIpAddressTable.
     unsafe { ffi::FreeMibTable(table.cast()) };
-    let mut list: Vec<_> = rows
+    rows
+}
+
+/// Usable IPv4 addresses of all adapters but loopback, with the adapter's name.
+pub fn local_ipv4() -> Vec<(String, Ipv4Addr)> {
+    let mut list: Vec<_> = unicast_ipv4()
         .into_iter()
+        .filter(|(_, a)| !a.is_loopback())
         .map(|(luid, a)| {
             let mut alias = [0u16; 257];
             // SAFETY: the buffer holds `alias.len()` UTF-16 units, NDIS_IF_MAX_STRING_SIZE + 1.
@@ -89,24 +94,14 @@ pub fn local_ipv4() -> Vec<(String, Ipv4Addr)> {
     list
 }
 
-/// The adapter's usable IPv4 addresses (duplicate detection finished).
+/// The adapter's usable IPv4 addresses.
 fn current_ipv4(luid: u64) -> Vec<Ipv4Addr> {
-    let mut table: *mut ffi::MIB_UNICASTIPADDRESS_TABLE = std::ptr::null_mut();
-    // SAFETY: on success the table is allocated by IP Helper and freed below.
-    if unsafe { ffi::GetUnicastIpAddressTable(AF_INET, &mut table) } != 0 {
-        return Vec::new();
-    }
-    // SAFETY: the table holds NumEntries rows; the union fields read match AF_INET rows.
-    let found = unsafe {
-        std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize)
-            .iter()
-            .filter(|r| r.InterfaceLuid.Value == luid && r.DadState == IpDadStatePreferred)
-            .map(|r| Ipv4Addr::from(r.Address.Ipv4.sin_addr.S_un.S_addr.to_ne_bytes()))
-            .collect()
-    };
-    // SAFETY: allocated by GetUnicastIpAddressTable.
-    unsafe { ffi::FreeMibTable(table.cast()) };
-    found
+    unicast_ipv4()
+        .into_iter()
+        // SAFETY: NET_LUID_LH is a plain 64-bit union; reading it as its Value is always valid.
+        .filter(|(l, _)| unsafe { l.Value } == luid)
+        .map(|(_, a)| a)
+        .collect()
 }
 
 /// Keeps the remote network from taking over this computer's routing. Windows' DHCP client
