@@ -337,24 +337,17 @@ pub fn theme_switch(ui: &mut egui::Ui, current: &str) -> Option<&'static str> {
 }
 
 /// "Status `<text>`" bar with optional extra content on the right.
-/// Info bar under a tab's controls: `left` and `right` fill its two sides. The tab itself shows
-/// the state, so this bar shows details: who is connected, where to connect, the IP setup.
-pub fn status_bar(ui: &mut egui::Ui, left: impl FnOnce(&mut egui::Ui), right: impl FnOnce(&mut egui::Ui)) {
+/// Status line under a tab's controls. The tab itself shows the state, so this shows details:
+/// who is connected and for how long, retries, why it ended.
+pub fn status_bar(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui)) {
     let p = pal(ui);
     egui::Frame::new()
         .fill(p.soft)
         .corner_radius(8.0)
-        .inner_margin(egui::Margin::symmetric(12, 8))
+        .inner_margin(egui::Margin::symmetric(12, 6))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                // Right side first so a long left text is truncated with "…" instead of
-                // overlapping it.
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    right(ui);
-                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), left);
-                });
-            });
+            ui.horizontal(content);
         });
 }
 

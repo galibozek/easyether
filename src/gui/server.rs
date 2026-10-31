@@ -252,52 +252,51 @@ impl ServerTab {
                 ui.label(RichText::new("anyone who reaches this port can join").color(warn))
                     .on_hover_text("No encryption and no password. Use it only on a trusted LAN.");
             }
+            // What to give the client, on the right of the settings row (the client tab has
+            // its network settings in the same place).
+            let address = format!("{}:{}", self.local_ip, self.port.trim());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(RichText::new(address).strong());
+                widgets::caption(ui, "My address");
+            });
         });
 
-        let address = format!("{}:{}", self.local_ip, self.port.trim());
         let handle = self.worker.handle.as_ref();
         let client = handle.and_then(|h| h.client_session());
         let last = handle.and_then(|h| h.last_client());
         let status = self.worker.status.as_str();
         let p = widgets::pal(ui);
         let uptime = |since: std::time::Instant| crate::log::format_uptime(since.elapsed());
-        widgets::status_bar(
-            ui,
-            |ui| {
-                // Details the tab does not show: who is connected and for how long, who left,
-                // and what is wrong.
-                widgets::muted(ui, "Status");
-                match client {
-                    Some((addr, since)) if running => {
-                        widgets::truncated(ui, format!("client {addr}"), p.text, true);
-                        widgets::muted(ui, format!("· connected {}", uptime(since)));
-                    }
-                    _ if running && status.starts_with("Adapter unavailable") => {
-                        widgets::truncated(ui, "adapter unplugged · waiting for it", p.warn, false);
-                    }
-                    _ if running && status.starts_with("Starting") => {
-                        widgets::truncated(ui, "starting…", p.muted, false);
-                    }
-                    _ if running => match last {
-                        Some((addr, left)) => widgets::truncated(
-                            ui,
-                            format!("client {} left {} ago · waiting", addr.ip(), uptime(left)),
-                            p.muted,
-                            false,
-                        ),
-                        None => widgets::truncated(ui, "waiting for a client", p.muted, false),
-                    },
-                    _ if status.starts_with("Error") => {
-                        widgets::truncated(ui, "could not start · see log", p.warn, false);
-                    }
-                    _ => widgets::truncated(ui, "not sharing", p.muted, false),
+        widgets::status_bar(ui, |ui| {
+            // Details the tab does not show: who is connected and for how long, who left,
+            // and what is wrong.
+            widgets::muted(ui, "Status");
+            match client {
+                Some((addr, since)) if running => {
+                    widgets::truncated(ui, format!("client {addr}"), p.text, true);
+                    widgets::muted(ui, format!("· connected {}", uptime(since)));
                 }
-            },
-            |ui| {
-                ui.label(RichText::new(address).strong());
-                widgets::muted(ui, "My address");
-            },
-        );
+                _ if running && status.starts_with("Adapter unavailable") => {
+                    widgets::truncated(ui, "adapter unplugged · waiting for it", p.warn, false);
+                }
+                _ if running && status.starts_with("Starting") => {
+                    widgets::truncated(ui, "starting…", p.muted, false);
+                }
+                _ if running => match last {
+                    Some((addr, left)) => widgets::truncated(
+                        ui,
+                        format!("client {} left {} ago · waiting", addr.ip(), uptime(left)),
+                        p.muted,
+                        false,
+                    ),
+                    None => widgets::truncated(ui, "waiting for a client", p.muted, false),
+                },
+                _ if status.starts_with("Error") => {
+                    widgets::truncated(ui, "could not start · see log", p.warn, false);
+                }
+                _ => widgets::truncated(ui, "not sharing", p.muted, false),
+            }
+        });
 
         self.worker.log.ui(ui, "Server Log");
     }
