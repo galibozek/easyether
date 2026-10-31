@@ -253,20 +253,20 @@ pub const SETTINGS_ROW_HEIGHT: f32 = 26.0;
 /// "Copied to clipboard" shown under the control that copied, for two seconds.
 #[derive(Default)]
 pub struct Copied {
-    shown: Option<(std::time::Instant, Option<egui::Pos2>)>,
+    shown: Option<(std::time::Instant, egui::Pos2)>,
 }
 
 impl Copied {
-    /// Copies `text` and notes where to show the confirmation (under `from`). With `None` it is
-    /// not shown on its own: the caller has a hover text of its own and shows it there
-    /// (see [`Copied::active`]), so the two do not overlap.
-    pub fn copy(&mut self, ctx: &egui::Context, text: String, from: Option<&egui::Response>) {
+    /// Copies `text` and notes where to show the confirmation (under `from`).
+    pub fn copy(&mut self, ctx: &egui::Context, text: String, from: &egui::Response) {
         ctx.copy_text(text);
-        let pos = from.map_or(egui::Pos2::ZERO, |r| r.rect.left_bottom() + egui::vec2(0.0, 4.0));
-        self.shown = Some((std::time::Instant::now(), from.map(|_| pos)));
+        self.shown = Some((
+            std::time::Instant::now(),
+            from.rect.left_bottom() + egui::vec2(0.0, 4.0),
+        ));
     }
 
-    /// Whether the confirmation is still due.
+    /// Whether the confirmation is still shown (a hover text of the same control would cover it).
     pub fn active(&self) -> bool {
         self.shown.is_some_and(|(at, _)| at.elapsed() < Self::SHOWN_FOR)
     }
@@ -280,11 +280,9 @@ impl Copied {
             self.shown = None;
             return;
         };
-        if let Some(pos) = pos {
-            egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), egui::Id::unique("copied"), pos).show(|ui| {
-                ui.label("Copied to clipboard");
-            });
-        }
+        egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), egui::Id::unique("copied"), pos).show(|ui| {
+            ui.label("Copied to clipboard");
+        });
         ui.ctx().request_repaint_after(left);
     }
 }
