@@ -247,6 +247,8 @@ struct Counters {
     last_ping: AtomicU64,
     /// Last measured round trip in microseconds; 0 while none.
     rtt_us: AtomicU64,
+    /// How many round trips were measured, so the reporter can tell a new one from the last.
+    rtt_count: AtomicU64,
     /// Longest frame write to the peer since the last link report, in microseconds.
     max_send_us: AtomicU64,
     /// How often the adapter's backlog was dropped after a stuck write.
@@ -257,6 +259,10 @@ struct Counters {
 const LINK_REPORT: Duration = Duration::from_secs(30);
 /// Whether that report is written (`--link-log`).
 pub static LINK_LOG: AtomicBool = AtomicBool::new(false);
+/// The shown throughput is the average over this long, so it does not flicker.
+const RATE_WINDOW: Duration = Duration::from_secs(3);
+/// The shown latency is the median of this many pings (one a second).
+const RTT_SAMPLES: usize = 5;
 
 /// The round trip shown: the last measured one, or, once our latest ping has waited a second or
 /// more, that wait (a stalled link shows a growing latency, not an old one). A shorter wait is
@@ -395,11 +401,15 @@ fn run_session(
     // Throughput and latency for the GUI, once a second, only sent when they change (so an
     // idle GUI is not repainted for nothing). A thread of its own: the sender can sit in a
     // blocked write for seconds when the link stalls, and that is exactly when the growing
-    // latency and the dropping rates should show.
+    // latency and the dropping rates should show. Both are smoothed so the tab does not flicker:
+    // the rate over the last few seconds, the latency as the median of the last few pings.
     let reporter = {
         let (done, counters, log) = (done.clone(), counters.clone(), log.clone());
         std::thread::spawn(move || {
-            let (mut last_report, mut prev_tx, mut prev_rx) = (Instant::now(), 0u64, 0u64);
+            let mut last_report = Instant::now();
+            // (when, tx bytes, rx bytes), oldest first, spanning RATE_WINDOW.
+            let mut history = std::collections::VecDeque::from([(Instant::now(), 0u64, 0u64)]);
+            let (mut rtts, mut rtt_seen) = (std::collections::VecDeque::new(), 0u64);
             let mut last_shown = ((0u64, 0u64), None::<u64>);
             // For the link report in the log: when, and the counters at that time.
             let mut link_at = Instant::now();
@@ -410,32 +420,47 @@ fn run_session(
                 if done.load(Ordering::SeqCst) {
                     break;
                 }
-                let elapsed = last_report.elapsed();
-                if elapsed < Duration::from_secs(1) {
+                if last_report.elapsed() < Duration::from_secs(1) {
                     continue;
                 }
+                last_report = Instant::now();
                 let (tx_b, rx_b) = (
                     counters.tx_bytes.load(Ordering::Relaxed),
                     counters.rx_bytes.load(Ordering::Relaxed),
                 );
-                let secs = elapsed.as_secs_f64();
+                history.push_back((Instant::now(), tx_b, rx_b));
+                while history.len() > 2 && history[0].0.elapsed() > RATE_WINDOW {
+                    history.pop_front();
+                }
+                let (since, prev_tx, prev_rx) = history[0];
+                let secs = since.elapsed().as_secs_f64().max(0.001);
                 // Saturating: a ping's bytes are taken off the count after it was read, which can
-                // fall just after the previous snapshot.
+                // fall just after a snapshot.
                 let rates = (
                     (rx_b.saturating_sub(prev_rx) as f64 / secs) as u64,
                     (tx_b.saturating_sub(prev_tx) as f64 / secs) as u64,
                 );
+                let count = counters.rtt_count.load(Ordering::Relaxed);
+                if count != rtt_seen {
+                    rtt_seen = count;
+                    rtts.push_back(counters.rtt_us.load(Ordering::Relaxed));
+                    if rtts.len() > RTT_SAMPLES {
+                        rtts.pop_front();
+                    }
+                }
+                let mut sorted: Vec<u64> = rtts.iter().copied().collect();
+                sorted.sort_unstable();
+                let median = sorted.get(sorted.len() / 2).copied().unwrap_or(0);
                 // The token of an unanswered ping is when it was sent.
                 let token = counters.last_ping.load(Ordering::Relaxed);
                 let waiting = (token != 0).then(|| base.elapsed().saturating_sub(Duration::from_nanos(token)));
-                let rtt = shown_rtt(counters.rtt_us.load(Ordering::Relaxed), waiting);
+                let rtt = shown_rtt(median, waiting);
                 // Compared at 1 ms, the precision shown.
                 let shown = (rates, rtt.map(|d| d.as_millis() as u64));
                 if shown != last_shown {
                     log.traffic(rates.0, rates.1, rtt);
                     last_shown = shown;
                 }
-                (last_report, prev_tx, prev_rx) = (Instant::now(), tx_b, rx_b);
 
                 // With --link-log, every LINK_REPORT: what went through and how the link
                 // behaved, so a slowdown can be located afterwards: frames not coming from the
@@ -512,6 +537,7 @@ fn run_session(
                         counters
                             .rtt_us
                             .store((rtt.as_micros() as u64).max(1), Ordering::Relaxed);
+                        counters.rtt_count.fetch_add(1, Ordering::Relaxed);
                     }
                 }
                 Ok(Some(proto::Msg::Batch)) if frames.is_empty() => {}

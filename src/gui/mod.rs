@@ -253,17 +253,13 @@ impl App {
                         );
                         // State badge on the right side of the tab: "↓ rx ↑ tx · rtt",
                         // nothing while off. A narrow tab shows its name only.
-                        let badge_id = egui::Id::unique(("tab_badge", col));
                         if let Some(badge) = badges[col].as_ref().filter(|_| widths[col] > compact) {
                             let color = if selected {
                                 Color32::WHITE
                             } else {
                                 badge.activity.color(p)
                             };
-                            let (x, y) = (rect.right() - 12.0, rect.center().y);
-                            widgets::paint_badge(painter, badge_id, x, y, color, badge);
-                        } else {
-                            widgets::reset_badge(ui.ctx(), badge_id);
+                            widgets::paint_badge(painter, rect.right() - 12.0, rect.center().y, color, badge);
                         }
                         if resp.clicked() && !selected && !locked {
                             self.tab = tab;
