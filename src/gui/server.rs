@@ -164,7 +164,7 @@ impl ServerTab {
 
     pub fn ui(&mut self, ui: &mut egui::Ui, settings: &mut Settings, confirm: &mut Option<Confirm>) {
         let running = self.is_running();
-        widgets::title(ui, "Share a local Ethernet adapter", "");
+        widgets::title(ui, "Share a local Ethernet adapter");
         ui.add_space(4.0);
 
         #[cfg(windows)]

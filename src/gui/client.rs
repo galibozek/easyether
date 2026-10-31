@@ -118,7 +118,7 @@ impl ClientTab {
 
     pub fn ui(&mut self, ui: &mut egui::Ui, settings: &mut Settings, confirm: &mut Option<Confirm>) {
         let running = self.is_running();
-        widgets::title(ui, "Connect to a shared adapter", "");
+        widgets::title(ui, "Connect to a shared adapter");
         ui.add_space(4.0);
 
         ui.horizontal(|ui| {
@@ -132,8 +132,12 @@ impl ClientTab {
                         .hint_text("IPv4, IPv6 or host name")
                         .desired_width(host_width),
                 );
-                // "address:port" as given by the server ("My address"): the port goes to its field.
-                if edit.changed()
+                // "address:port" as given by the server ("My address"): the port goes to its field,
+                // on paste or when leaving the field (not while typing, or the rest of the port
+                // would land in the address).
+                let pasted =
+                    edit.changed() && ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))));
+                if (pasted || edit.lost_focus())
                     && let Some((host, port)) = split_host_port(&self.host)
                 {
                     self.host = host;

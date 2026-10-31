@@ -221,12 +221,8 @@ pub fn card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
         });
 }
 
-pub fn title(ui: &mut egui::Ui, text: &str, subtitle: &str) {
-    let p = pal(ui);
-    ui.label(RichText::new(text).size(19.0).strong().color(p.text));
-    if !subtitle.is_empty() {
-        ui.label(RichText::new(subtitle).color(p.muted));
-    }
+pub fn title(ui: &mut egui::Ui, text: &str) {
+    ui.label(RichText::new(text).size(19.0).strong().color(pal(ui).text));
 }
 
 /// Small upper-case caption above an input.
@@ -356,7 +352,6 @@ pub fn theme_switch(ui: &mut egui::Ui, current: &str) -> Option<&'static str> {
     chosen
 }
 
-/// "Status `<text>`" bar with optional extra content on the right.
 /// Status line under a tab's controls. The tab itself shows the state, so this shows details:
 /// who is connected and for how long, retries, why it ended.
 pub fn status_bar(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui)) {
