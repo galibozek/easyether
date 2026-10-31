@@ -106,12 +106,12 @@ pub fn format_uptime(d: std::time::Duration) -> String {
     }
 }
 
-/// "0.4 ms", "23 ms", "1.2 s": a round-trip time as shown next to the throughput.
+/// "<1 ms", "23 ms", "1.2 s": a round-trip time as shown next to the throughput.
 pub fn format_rtt(rtt: std::time::Duration) -> String {
     let ms = rtt.as_secs_f64() * 1000.0;
-    if ms < 10.0 {
-        format!("{ms:.1} ms")
-    } else if ms < 1000.0 {
+    if ms < 0.5 {
+        "<1 ms".into()
+    } else if ms < 999.5 {
         format!("{ms:.0} ms")
     } else {
         format!("{:.1} s", ms / 1000.0)
@@ -140,7 +140,8 @@ mod tests {
         assert_eq!(format_uptime(Duration::from_secs(45)), "45 s");
         assert_eq!(format_uptime(Duration::from_secs(12 * 60 + 3)), "12 min 03 s");
         assert_eq!(format_uptime(Duration::from_secs(2 * 3600 + 5 * 60 + 59)), "2 h 05 min");
-        assert_eq!(format_rtt(Duration::from_micros(420)), "0.4 ms");
+        assert_eq!(format_rtt(Duration::from_micros(420)), "<1 ms");
+        assert_eq!(format_rtt(Duration::from_micros(4_600)), "5 ms");
         assert_eq!(format_rtt(Duration::from_millis(23)), "23 ms");
         assert_eq!(format_rtt(Duration::from_millis(1234)), "1.2 s");
     }
