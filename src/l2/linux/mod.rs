@@ -85,7 +85,14 @@ fn random_mac() -> [u8; 6] {
     mac
 }
 
-pub fn open_server(id: &str, log: &Logger) -> io::Result<Box<dyn L2Port>> {
+/// Opens interface `id` each time it is called (an interface keeps its name across a USB
+/// re-plug: predictable names are derived from the port or the MAC).
+pub fn server_opener(id: &str, log: &Logger) -> crate::l2::Opener {
+    let (id, log) = (id.to_string(), log.clone());
+    Box::new(move || open_server(&id, &log))
+}
+
+fn open_server(id: &str, log: &Logger) -> io::Result<Box<dyn L2Port>> {
     // A Linux bridge (docker0, br0, virbr0...) gets a TAP *port*: frames from the client then
     // enter the bridge like from any other port, so the host itself and every other port see
     // them and reply. Capturing the bridge device instead would make the host unreachable.

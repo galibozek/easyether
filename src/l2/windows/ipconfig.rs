@@ -5,9 +5,14 @@ use std::io;
 use std::net::Ipv4Addr;
 
 use windows_sys::Win32::NetworkManagement::Ndis::NET_LUID_LH;
-use windows_sys::Win32::Networking::WinSock::{AF_INET, IpDadStatePreferred};
+use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6, IpDadStatePreferred};
 
-use super::ffi::{self, MIB_UNICASTIPADDRESS_ROW};
+use super::ffi::{self, MIB_IPINTERFACE_ROW, MIB_UNICASTIPADDRESS_ROW};
+
+/// Interface metric of the tunnel adapter: far above the automatic metrics Windows gives real
+/// adapters (5 to 55), so any route through it loses against the same route via a local
+/// network. The same value the Linux client uses for its routes.
+const TUNNEL_METRIC: u32 = 9000;
 use super::{CLIENT_ADAPTER_NAME, NEO_HWID, reg};
 use crate::log::Logger;
 
@@ -60,6 +65,58 @@ fn current_ipv4(luid: u64) -> Vec<Ipv4Addr> {
     // SAFETY: allocated by GetUnicastIpAddressTable.
     unsafe { ffi::FreeMibTable(table.cast()) };
     found
+}
+
+/// Keeps the remote network from taking over this computer's routing. Windows' DHCP client
+/// accepts a default gateway (and IPv6 router advertisements a default route) on the tunnel
+/// adapter like on any other; with an automatic metric (Neo6 reports 100 Mbit/s) that route
+/// can win against Wi-Fi, and then even the tunnel's own connection to the server would be
+/// sent into the tunnel and the client could not reconnect. A fixed high metric makes every
+/// local route win; where Windows supports it, default routes on the adapter are also ignored
+/// outright. Applied on every connect and after the adapter was reopened, since a restarted
+/// adapter loses it. Best effort.
+pub fn prefer_local_networks(log: &Logger) {
+    let luid = match neo_luid() {
+        Ok(l) => l,
+        Err(e) => {
+            log.warn(format!(
+                "Could not lower the route priority of '{CLIENT_ADAPTER_NAME}': {e}"
+            ));
+            return;
+        }
+    };
+    for family in [AF_INET, AF_INET6] {
+        // SAFETY: MIB_IPINTERFACE_ROW is plain old data; all-zero is a valid value.
+        let mut row: MIB_IPINTERFACE_ROW = unsafe { std::mem::zeroed() };
+        // SAFETY: `row` is a valid, exclusively borrowed row for the call.
+        unsafe { ffi::InitializeIpInterfaceEntry(&mut row) };
+        row.Family = family;
+        row.InterfaceLuid = luid;
+        // SAFETY: `row` names the interface by family and LUID; the call fills in the rest.
+        if unsafe { ffi::GetIpInterfaceEntry(&mut row) } != 0 {
+            continue; // This family is disabled on the adapter (e.g. IPv6 unbound).
+        }
+        // SetIpInterfaceEntry rejects IPv4 rows that carry a site prefix length.
+        if family == AF_INET {
+            row.SitePrefixLength = 0;
+        }
+        row.UseAutomaticMetric = false;
+        row.Metric = TUNNEL_METRIC;
+        // SAFETY: `row` was filled by GetIpInterfaceEntry and only adjusted above.
+        let r = unsafe { ffi::SetIpInterfaceEntry(&mut row) };
+        if r != 0 {
+            log.warn(format!(
+                "Could not lower the route priority of '{CLIENT_ADAPTER_NAME}' ({}): routes from the remote network may compete with local ones.",
+                io::Error::from_raw_os_error(r as i32)
+            ));
+            continue;
+        }
+        // Separate call: older Windows versions reject the field, and the metric must not
+        // depend on it.
+        row.DisableDefaultRoutes = true;
+        // SAFETY: as above.
+        let _ = unsafe { ffi::SetIpInterfaceEntry(&mut row) };
+    }
 }
 
 /// Windows runs DHCP (with the 169.254.x.x fallback) on the adapter by itself; only report

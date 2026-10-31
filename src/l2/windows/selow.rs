@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use super::ffi::{self, Handle};
 use super::{DevicePort, reg};
-use crate::l2::exchange::{SL_ADAPTER_LIST_SIZE, SeLowAdapterList, parse_selow_adapter_list};
+use crate::l2::exchange::{SL_ADAPTER_LIST_SIZE, SeLowAdapterList, parse_selow_adapter_list, unique_by_mac};
 use crate::l2::{AdapterInfo, L2Port, format_mac};
 use crate::log::Logger;
 
@@ -45,6 +45,21 @@ fn read_list() -> io::Result<SeLowAdapterList> {
         std::thread::sleep(Duration::from_millis(250));
     }
     unreachable!()
+}
+
+/// MAC of the adapter with this GUID, if SeLow lists it.
+pub fn mac_of(guid: &str) -> Option<[u8; 6]> {
+    let list = read_list().ok()?;
+    list.adapters
+        .iter()
+        .find(|a| a.guid().eq_ignore_ascii_case(guid))
+        .map(|a| a.mac)
+}
+
+/// GUID of the one adapter with this MAC (see `unique_by_mac`).
+pub fn guid_by_mac(mac: [u8; 6]) -> Option<String> {
+    let list = read_list().ok()?;
+    unique_by_mac(&list.adapters, mac).map(|a| a.guid().to_string())
 }
 
 pub fn list_adapters() -> io::Result<Vec<AdapterInfo>> {

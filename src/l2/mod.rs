@@ -53,16 +53,19 @@ pub trait L2Port: Send + Sync {
     }
 }
 
-type Opener = Box<dyn Fn() -> io::Result<Box<dyn L2Port>> + Send + Sync>;
+pub(crate) type Opener = Box<dyn Fn() -> io::Result<Box<dyn L2Port>> + Send + Sync>;
+type ReopenHook = Box<dyn Fn() + Send + Sync>;
 
-/// Watches a physical adapter and survives it disappearing (USB unplug, driver restart):
-/// errors are logged once, frames are dropped while it is gone, and it is reopened every
-/// second until it comes back. Link (cable) changes are logged too where available.
+/// Watches an adapter and survives it disappearing (USB unplug, driver restart, adapter
+/// disabled): errors are logged once, frames are dropped while it is gone, and it is reopened
+/// every second until it comes back. Link (cable) changes are logged too where available.
 pub struct ResilientPort {
     name: String,
     open: Opener,
     log: Logger,
     state: Mutex<WatchState>,
+    /// Runs after a successful reopen, e.g. to configure the adapter's IP again.
+    on_reopen: Mutex<Option<ReopenHook>>,
 }
 
 struct WatchState {
@@ -86,9 +89,15 @@ impl ResilientPort {
                 last_link_check: Instant::now() - Duration::from_secs(10),
                 link: None,
             }),
+            on_reopen: Mutex::new(None),
         };
         rp.current();
         Ok(rp)
+    }
+
+    /// Sets what to do after the adapter was reopened (it runs on the forwarding thread).
+    pub fn set_on_reopen(&self, hook: impl Fn() + Send + Sync + 'static) {
+        *self.on_reopen.lock().unwrap() = Some(Box::new(hook));
     }
 
     /// The open port, reopening it (at most once a second) if it was lost.
@@ -101,6 +110,9 @@ impl ResilientPort {
                     .info(format!("Adapter '{}' is back; forwarding resumed.", self.name));
                 st.port = Some(Arc::from(p));
                 st.link = None;
+                if let Some(hook) = self.on_reopen.lock().unwrap().as_ref() {
+                    hook();
+                }
             }
         }
         let port = st.port.clone()?;
@@ -131,7 +143,7 @@ impl ResilientPort {
             st.port = None;
             st.last_reopen = Instant::now();
             self.log.warn(format!(
-                "Adapter '{}' disappeared ({e}). Waiting for it to come back (e.g. USB re-plug)...",
+                "Adapter '{}' disappeared ({e}). Waiting for it to come back (USB re-plug, driver restart)...",
                 self.name
             ));
         }
@@ -182,13 +194,31 @@ pub fn list_adapters() -> io::Result<Vec<AdapterInfo>> {
 
 /// Opens a physical adapter for sharing (server side), watched for disappearance.
 pub fn open_server(id: &str, name: &str, log: &Logger) -> io::Result<ResilientPort> {
-    let (id, log2) = (id.to_string(), log.clone());
-    ResilientPort::open(name, Box::new(move || platform::open_server(&id, &log2)), log)
+    ResilientPort::open(name, platform::server_opener(id, log), log)
 }
 
-/// Opens the virtual adapter (client side). `mac` is used where the platform lets us choose it.
-pub fn open_client(mac: [u8; 6], log: &Logger) -> io::Result<Box<dyn L2Port>> {
-    platform::open_client(mac, log)
+/// Opens the virtual adapter (client side), watched like the server's so that a driver restart
+/// or a disabled-and-enabled adapter does not end the client. `mac` is used where the platform
+/// lets us choose it.
+pub fn open_client(mac: [u8; 6], log: &Logger) -> io::Result<ResilientPort> {
+    let log2 = log.clone();
+    ResilientPort::open(
+        platform::CLIENT_ADAPTER_NAME,
+        Box::new(move || platform::open_client(mac, &log2)),
+        log,
+    )
+}
+
+/// Makes the client's virtual adapter lose against every local network when routes compete
+/// (Windows: interface metric 9000, default routes ignored where supported), so a gateway or
+/// route handed out by a DHCP server on the shared network cannot pull this computer's own
+/// traffic, the tunnel's connection included, into the tunnel. Linux does the same through
+/// its dhcpcd options. Best effort; logs what it could not do.
+pub fn prefer_local_networks(log: &Logger) {
+    #[cfg(windows)]
+    windows::prefer_local_networks(log);
+    #[cfg(not(windows))]
+    let _ = log;
 }
 
 /// Optional static IPv4 on the client's virtual adapter. Dropping the guard removes it.
@@ -317,5 +347,54 @@ mod tests {
     #[test]
     fn mac_format() {
         assert_eq!(format_mac(&[0x5e, 0, 1, 2, 3, 0xff]), "5E:00:01:02:03:FF");
+    }
+
+    /// Fails its first `recv` (adapter gone), works afterwards.
+    struct FailsOnce(std::sync::atomic::AtomicBool);
+
+    impl L2Port for FailsOnce {
+        fn recv(&self, _out: &mut Vec<Vec<u8>>, _timeout: Duration) -> io::Result<()> {
+            if self.0.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                return Err(io::Error::other("device removed"));
+            }
+            Ok(())
+        }
+        fn send(&self, _frames: &[Vec<u8>]) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn lost_adapter_is_reopened_and_the_hook_runs() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let opens = Arc::new(AtomicUsize::new(0));
+        let hooks = Arc::new(AtomicUsize::new(0));
+        let (log, _rx) = Logger::new(None);
+        let opener = {
+            let opens = opens.clone();
+            Box::new(move || {
+                // The first port loses its device; the reopened one is fine.
+                let first = opens.fetch_add(1, Ordering::SeqCst) == 0;
+                Ok(Box::new(FailsOnce(std::sync::atomic::AtomicBool::new(first))) as Box<dyn L2Port>)
+            })
+        };
+        let port = ResilientPort::open("test", opener, &log).unwrap();
+        let h = hooks.clone();
+        port.set_on_reopen(move || {
+            h.fetch_add(1, Ordering::SeqCst);
+        });
+        let mut out = Vec::new();
+        // The error is absorbed: the session using the port does not end.
+        port.recv(&mut out, Duration::ZERO).unwrap();
+        assert!(!port.is_present());
+        assert_eq!(hooks.load(Ordering::SeqCst), 0);
+        // Reopened at most once a second; the hook runs right after.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !port.is_present() && Instant::now() < deadline {
+            port.recv(&mut out, Duration::from_millis(100)).unwrap();
+        }
+        assert!(port.is_present());
+        assert_eq!(opens.load(Ordering::SeqCst), 2);
+        assert_eq!(hooks.load(Ordering::SeqCst), 1);
     }
 }
