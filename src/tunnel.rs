@@ -247,7 +247,14 @@ struct Counters {
     last_ping: AtomicU64,
     /// Last measured round trip in microseconds; 0 while none.
     rtt_us: AtomicU64,
+    /// Longest frame write to the peer since the last link report, in microseconds.
+    max_send_us: AtomicU64,
+    /// How often the adapter's backlog was dropped after a stuck write.
+    stall_drops: AtomicU64,
 }
+
+/// How often the session's state goes to the log, so a slowdown can be traced afterwards.
+const LINK_REPORT: Duration = Duration::from_secs(30);
 
 /// Round trip shown while our latest ping is unanswered: the measured one, or the time it has
 /// been waiting if that is longer (so a stalled link shows a growing latency, not an old one).
@@ -353,9 +360,14 @@ fn run_session(
                         counters.tx_bytes.fetch_add(buf.len() as u64, Ordering::Relaxed);
                         stream.send(&buf)
                     });
-                    if started.elapsed() >= STALL {
+                    let took = started.elapsed();
+                    counters
+                        .max_send_us
+                        .fetch_max(took.as_micros() as u64, Ordering::Relaxed);
+                    if took >= STALL {
                         // The link was stuck: what piled up in the adapter meanwhile is stale
                         // (higher layers retransmit), so do not deliver it late.
+                        counters.stall_drops.fetch_add(1, Ordering::Relaxed);
                         port.drain();
                     }
                     r
@@ -387,6 +399,9 @@ fn run_session(
         std::thread::spawn(move || {
             let (mut last_report, mut prev_tx, mut prev_rx) = (Instant::now(), 0u64, 0u64);
             let mut last_shown = ((0u64, 0u64), None::<u64>);
+            // For the link report in the log: when, and the counters at that time.
+            let mut link_at = Instant::now();
+            let mut link_prev = [0u64; 5];
             while !done.load(Ordering::SeqCst) {
                 // Woken at once when the session ends (see below), so the end is not delayed.
                 std::thread::park_timeout(Duration::from_millis(100));
@@ -419,6 +434,34 @@ fn run_session(
                     last_shown = shown;
                 }
                 (last_report, prev_tx, prev_rx) = (Instant::now(), tx_b, rx_b);
+
+                // Every LINK_REPORT, what went through and how the link behaved, so a slowdown
+                // can be located afterwards: frames not coming from the adapter, writes stuck
+                // on TCP, or the peer not answering.
+                if link_at.elapsed() >= LINK_REPORT {
+                    let now = [
+                        counters.to_peer.load(Ordering::Relaxed),
+                        counters.from_peer.load(Ordering::Relaxed),
+                        tx_b,
+                        rx_b,
+                        counters.stall_drops.load(Ordering::Relaxed),
+                    ];
+                    let d: Vec<u64> = now.iter().zip(link_prev).map(|(n, p)| n.saturating_sub(p)).collect();
+                    let secs = link_at.elapsed().as_secs();
+                    let longest = counters.max_send_us.swap(0, Ordering::Relaxed) / 1000;
+                    let latency = rtt.map_or_else(|| "-".to_string(), crate::log::format_rtt);
+                    log.info(format!(
+                        "Link, last {secs} s: {} frames ({} KB) to the peer, {} frames ({} KB) from the peer, \
+                         latency {latency}{}, longest write {longest} ms, stalls {}.",
+                        d[0],
+                        d[2] / 1000,
+                        d[1],
+                        d[3] / 1000,
+                        if token != 0 { " (ping unanswered)" } else { "" },
+                        d[4],
+                    ));
+                    (link_at, link_prev) = (Instant::now(), now);
+                }
             }
         })
     };
