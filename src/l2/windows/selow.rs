@@ -98,14 +98,18 @@ pub fn list_adapters() -> io::Result<Vec<AdapterInfo>> {
     Ok(out)
 }
 
-pub fn open(guid: &str, log: &Logger) -> io::Result<DevicePort> {
+/// Opens the adapter. With `wait`, a missing adapter is retried for ~5 s: right after boot or
+/// installation SeLow may still be binding, and a USB adapter can briefly disappear while it
+/// re-enumerates. Reopens pass `false`: the caller (ResilientPort) already retries every
+/// second, and waiting here would block the session and the accept loop for those 5 s.
+pub fn open(guid: &str, log: &Logger, wait: bool) -> io::Result<DevicePort> {
     let path = format!(r"\\.\SELOW_A_{guid}");
-    // USB adapters can briefly disappear while re-enumerating; retry for ~5 s.
+    let attempts = if wait { 20 } else { 0 };
     let mut attempt = 0;
     let dev = loop {
         match ffi::open_device(&path, ffi::FILE_SHARE_READ | ffi::FILE_SHARE_WRITE) {
             Ok(h) => break h,
-            Err(e) if attempt < 20 && e.raw_os_error() == Some(ffi::ERROR_FILE_NOT_FOUND) => {
+            Err(e) if attempt < attempts && e.raw_os_error() == Some(ffi::ERROR_FILE_NOT_FOUND) => {
                 if !is_available() {
                     return Err(not_installed(e));
                 }
