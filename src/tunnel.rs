@@ -124,10 +124,10 @@ fn configure_socket(tcp: &TcpStream) -> io::Result<()> {
     tcp.set_read_timeout(Some(peer_timeout))?;
     tcp.set_write_timeout(Some(peer_timeout))?;
     let s = socket2::SockRef::from(tcp);
-    let _ = s.set_recv_buffer_size(1 << 20);
-    // A modest send buffer, so that during a stall only a bounded amount of stale frames (this
-    // buffer plus the batch being written) is delivered late, instead of seconds' worth of them.
-    let _ = s.set_send_buffer_size(256 << 10);
+    // No SO_RCVBUF/SO_SNDBUF: setting them disables the OS autotuning (and Linux caps them at
+    // rmem_max/wmem_max, 208 KiB by default). Autotuned buffers follow the link's
+    // bandwidth-delay product, so throughput is not capped per round trip and the queue stays
+    // short on slow links. Stall detection still works: a stalled buffer blocks writes.
     let ka = socket2::TcpKeepalive::new()
         .with_time(Duration::from_secs(10))
         .with_interval(Duration::from_secs(5));
