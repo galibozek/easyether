@@ -321,6 +321,14 @@ impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.server.poll();
         self.client.poll();
+        // Starting one side clears the other's leftover "Error" / "Disconnected": it belongs to
+        // a run that is over, and would show again on the other tab once this one stops.
+        if self.server.is_running() {
+            self.client.clear_outcome();
+        }
+        if self.client.is_running() {
+            self.server.clear_outcome();
+        }
         // The connection time in the status bar ticks every second.
         if self.server.is_running() || self.client.is_running() {
             ctx.request_repaint_after(std::time::Duration::from_secs(1));

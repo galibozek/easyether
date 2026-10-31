@@ -41,27 +41,25 @@ impl ClientTab {
         self.worker.is_running()
     }
 
-    /// Short state for the tab badge; none while off.
+    /// Forgets how the last connection ended ("Disconnected"), once the other side has been
+    /// started.
+    pub fn clear_outcome(&mut self) {
+        if !self.is_running() {
+            self.worker.status = "Disconnected".into();
+        }
+    }
+
+    /// Short state for the tab badge: the live connection, or that we are getting there.
+    /// Nothing while off; why it ended and retry details are in the status bar only.
     pub fn badge(&self) -> Option<widgets::Badge> {
         use widgets::{Activity, Badge};
-        Some(if !self.is_running() {
-            // Ended by the server or an error (not by the user): draw attention.
-            if self.worker.status.starts_with("Disconnected -") {
-                Badge::new("Disconnected", Activity::Pending)
-            } else {
-                return None;
-            }
+        if !self.is_running() {
+            None
         } else if self.worker.status.starts_with("Connected") {
-            Badge::new("Connected", Activity::On).traffic(self.worker.traffic, self.worker.rtt)
-        } else if self.worker.status.starts_with("Connection lost") {
-            Badge::new("Reconnecting…", Activity::Pending)
-        } else if self.worker.status.starts_with("Server unreachable") {
-            Badge::new("Waiting for server…", Activity::Pending)
-        } else if self.worker.status.starts_with("Disconnecting") {
-            Badge::new("Disconnecting…", Activity::Pending)
+            Some(Badge::new("Connected", Activity::On).traffic(self.worker.traffic, self.worker.rtt))
         } else {
-            Badge::new("Connecting…", Activity::Pending)
-        })
+            Some(Badge::new("Connecting…", Activity::Pending))
+        }
     }
 
     pub fn poll(&mut self) {
@@ -201,13 +199,7 @@ impl ClientTab {
             "Automatic (DHCP)".into()
         };
         let server = format!("{}:{}", self.host.trim(), self.port.trim());
-        // The tab says "Reconnecting…"; the countdown and attempt number are only here.
-        let retry = self
-            .worker
-            .status
-            .split_once(" - retrying")
-            .filter(|_| running)
-            .map(|(_, rest)| format!("retrying{rest}"));
+        let status = self.worker.status.as_str();
         let link = self
             .worker
             .handle
@@ -219,30 +211,40 @@ impl ClientTab {
         widgets::status_bar(
             ui,
             |ui| {
-                // Where we are connected, for how long, and how stable it has been; the tab
-                // shows the state itself.
+                // Details the tab does not show: where we are connected, for how long, how
+                // stable it has been, when the next attempt comes, and why it ended.
                 widgets::muted(ui, "Status");
-                if !running {
-                    widgets::truncated(ui, "not connected", p.muted, false);
-                } else if link.since.is_some() {
-                    widgets::truncated(ui, server, p.text, true);
-                } else {
-                    // Connecting or reconnecting: the target, greyed out.
-                    widgets::truncated(ui, server, p.muted, false);
-                }
                 if let Some(since) = link.since {
-                    widgets::muted(ui, format!("connected {}", crate::log::format_uptime(since.elapsed())));
-                }
-                if let Some(retry) = retry {
-                    widgets::truncated(ui, retry, p.warn, false);
-                }
-                if link.reconnects > 0 {
-                    let text = match link.reconnects {
-                        1 => "reconnected once".to_string(),
-                        n => format!("reconnected {n} times"),
+                    widgets::truncated(ui, server, p.text, true);
+                    widgets::muted(
+                        ui,
+                        format!("· connected {}", crate::log::format_uptime(since.elapsed())),
+                    );
+                    if link.reconnects > 0 {
+                        let text = match link.reconnects {
+                            1 => "· 1 reconnect".to_string(),
+                            n => format!("· {n} reconnects"),
+                        };
+                        widgets::muted(ui, text)
+                            .on_hover_text("Connection losses since Connect, each followed by an automatic reconnect.");
+                    }
+                } else if let (true, Some((reason, next))) = (running, retry(status)) {
+                    let text = if reason.starts_with("Server unreachable") {
+                        format!("{server} unreachable · {next}")
+                    } else {
+                        format!("connection lost · {next}")
                     };
-                    widgets::muted(ui, text)
-                        .on_hover_text("Connection losses since Connect, each followed by an automatic reconnect.");
+                    widgets::truncated(ui, text, p.warn, false);
+                } else if running && status.starts_with("Disconnecting") {
+                    widgets::truncated(ui, "disconnecting…", p.muted, false);
+                } else if running {
+                    widgets::truncated(ui, format!("connecting to {server}…"), p.muted, false);
+                } else if let Some(reason) = status.strip_prefix("Disconnected - error: ") {
+                    widgets::truncated(ui, format!("{reason} · see log"), p.warn, false);
+                } else if status.starts_with("Disconnected - ") {
+                    widgets::truncated(ui, "ended by the server", p.warn, false);
+                } else {
+                    widgets::truncated(ui, "not connected", p.muted, false);
                 }
             },
             |ui| {
@@ -328,4 +330,32 @@ fn static_config(address: &str, mask: &str) -> Result<(Ipv4Addr, u8), String> {
         return Err(format!("{addr} cannot be used as an adapter address"));
     }
     Ok((addr, prefix))
+}
+
+/// From the tunnel's "<reason> - retrying in <s> s (attempt <n>)" status: the reason and
+/// "retry in <s> s (#<n>)".
+fn retry(status: &str) -> Option<(&str, String)> {
+    let (reason, rest) = status.split_once(" - retrying in ")?;
+    let (secs, rest) = rest.split_once(" s")?;
+    let attempt = rest.split_once("(attempt ")?.1.trim_end_matches(')');
+    Some((reason, format!("retry in {secs} s (#{attempt})")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retry_status_is_shortened() {
+        assert_eq!(
+            retry("Server unreachable - retrying in 5 s (attempt 3)"),
+            Some(("Server unreachable", "retry in 5 s (#3)".to_string()))
+        );
+        assert_eq!(
+            retry("Connection lost - retrying in 10 s (attempt 12)"),
+            Some(("Connection lost", "retry in 10 s (#12)".to_string()))
+        );
+        assert_eq!(retry("Connecting (attempt 2)..."), None);
+        assert_eq!(retry("Connected to 1.2.3.4:5555 via 'eeth0'"), None);
+    }
 }
