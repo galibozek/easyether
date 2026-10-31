@@ -214,9 +214,9 @@ impl ServerTab {
         });
 
         ui.horizontal(|ui| {
-            // Same height with and without the password controls, so toggling Secure does not
-            // make the panel jump.
-            ui.set_min_height(36.0);
+            ui.set_min_height(widgets::SETTINGS_ROW_HEIGHT);
+            // The checkbox would otherwise be as tall as the big buttons.
+            ui.spacing_mut().interact_size.y = 22.0;
             let toggle = ui
                 .add_enabled(!running, egui::Checkbox::new(&mut settings.server_secure, "Secure"))
                 .on_hover_text("TLS 1.3 encryption, and only clients that know the password can connect.");
@@ -232,10 +232,10 @@ impl ServerTab {
                         .size(20.0)
                         .strong(),
                 );
-                if widgets::compact_button(ui, true, "Copy").clicked() {
+                if widgets::small_button(ui, true, "Copy").clicked() {
                     ui.ctx().copy_text(self.password.clone());
                 }
-                let new_pw = widgets::compact_button(ui, true, "New password")
+                let new_pw = widgets::small_button(ui, true, "New password")
                     .on_hover_text("A connected client is disconnected, since its password stops being valid.");
                 if new_pw.clicked() {
                     if self.has_client() {
@@ -251,8 +251,7 @@ impl ServerTab {
                 ui.label(RichText::new("anyone who reaches this port can join").color(warn))
                     .on_hover_text("No encryption and no password. Use it only on a trusted LAN.");
             }
-            // What to give the client, on the right of the settings row (the client tab has
-            // its network settings in the same place).
+            // What to give the client, on the right of the settings row.
             let address = format!("{}:{}", self.local_ip, self.port.trim());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(RichText::new(address).strong());

@@ -252,16 +252,13 @@ pub fn secondary_button(text: &str) -> egui::Button<'static> {
     egui::Button::new(text.to_string()).min_size(egui::vec2(84.0, 32.0))
 }
 
-/// A secondary button only as wide as its text, with tighter side padding, for settings rows.
-pub fn compact_button(ui: &mut egui::Ui, enabled: bool, text: &str) -> egui::Response {
-    ui.scope(|ui| {
-        ui.spacing_mut().button_padding.x = 10.0;
-        ui.add_enabled(
-            enabled,
-            egui::Button::new(text.to_string()).min_size(egui::vec2(0.0, 32.0)),
-        )
-    })
-    .inner
+/// Height of the settings row under the fields, the same on both tabs: fits the password text,
+/// so toggling Secure does not make the panel jump.
+pub const SETTINGS_ROW_HEIGHT: f32 = 26.0;
+
+/// A small button, like the log's Copy / Clear, for the settings rows.
+pub fn small_button(ui: &mut egui::Ui, enabled: bool, text: &str) -> egui::Response {
+    ui.add_enabled(enabled, egui::Button::new(text.to_string()).small())
 }
 
 /// Modal dialog with a dimmed backdrop: title, body, and right-aligned `[cancel] [primary]`.
