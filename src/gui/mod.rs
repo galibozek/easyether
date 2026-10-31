@@ -321,6 +321,10 @@ impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.server.poll();
         self.client.poll();
+        // The connection time in the status bar ticks every second.
+        if self.server.is_running() || self.client.is_running() {
+            ctx.request_repaint_after(std::time::Duration::from_secs(1));
+        }
 
         while let Some(cmd) = self.tray.as_ref().and_then(|t| t.poll()) {
             match cmd {

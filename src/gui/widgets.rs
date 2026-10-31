@@ -224,8 +224,8 @@ pub fn caption(ui: &mut egui::Ui, text: &str) {
 }
 
 /// Secondary/explanatory text.
-pub fn muted(ui: &mut egui::Ui, text: impl Into<String>) {
-    ui.label(RichText::new(text.into()).color(pal(ui).muted));
+pub fn muted(ui: &mut egui::Ui, text: impl Into<String>) -> egui::Response {
+    ui.label(RichText::new(text.into()).color(pal(ui).muted))
 }
 
 pub fn primary_button(text: &str) -> egui::Button<'static> {

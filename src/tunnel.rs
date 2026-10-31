@@ -65,6 +65,19 @@ pub struct TunnelHandle {
     sock: Arc<Mutex<Option<TcpStream>>>,
     /// Server only: the running client session, if any.
     active: Arc<Mutex<Option<ActiveSession>>>,
+    /// Client only: the current connection, for the GUI.
+    link: Arc<Mutex<ClientLink>>,
+}
+
+/// The client's connection as the GUI shows it.
+#[derive(Clone, Copy, Default)]
+pub struct ClientLink {
+    /// The server, once connected.
+    pub peer: Option<SocketAddr>,
+    /// Since when the current session runs; `None` while (re)connecting.
+    pub since: Option<Instant>,
+    /// How often the connection was lost and re-established since Connect.
+    pub reconnects: u32,
 }
 
 impl TunnelHandle {
@@ -119,9 +132,14 @@ impl TunnelHandle {
         self.active.lock().unwrap().is_some()
     }
 
-    /// Server only: the connected client's address, if any.
-    pub fn client_addr(&self) -> Option<SocketAddr> {
-        self.active.lock().unwrap().as_ref().map(|s| s.peer)
+    /// Server only: the connected client's address and since when it is connected, if any.
+    pub fn client_session(&self) -> Option<(SocketAddr, Instant)> {
+        self.active.lock().unwrap().as_ref().map(|s| (s.peer, s.since))
+    }
+
+    /// Client only: the current connection.
+    pub fn client_link(&self) -> ClientLink {
+        *self.link.lock().unwrap()
     }
 }
 
@@ -193,8 +211,9 @@ struct ActiveSession {
     last_rx: Arc<Mutex<Instant>>,
     /// The client's id, so that client (and only it) can take its own session over.
     client_id: proto::ClientId,
-    /// Where the client connects from, for the GUI.
+    /// Where the client connects from, and since when, for the GUI.
     peer: SocketAddr,
+    since: Instant,
 }
 
 impl ActiveSession {
@@ -504,6 +523,7 @@ pub fn start_server(cfg: ServerConfig, log: Logger) -> TunnelHandle {
         password,
         sock: Arc::default(),
         active,
+        link: Arc::default(),
     }
 }
 
@@ -870,6 +890,7 @@ impl Server {
             last_rx: last_rx.clone(),
             client_id,
             peer,
+            since: Instant::now(),
         });
         self.log
             .info(format!("Client {peer} authenticated; Ethernet tunnel established."));
@@ -980,9 +1001,10 @@ pub struct ClientConfig {
 pub fn start_client(cfg: ClientConfig, log: Logger) -> TunnelHandle {
     let stop = Arc::new(AtomicBool::new(false));
     let sock: Arc<Mutex<Option<TcpStream>>> = Arc::default();
+    let link: Arc<Mutex<ClientLink>> = Arc::default();
     let thread = {
-        let (stop, sock) = (stop.clone(), sock.clone());
-        std::thread::spawn(move || match client_main(&cfg, &stop, &sock, &log) {
+        let (stop, sock, link) = (stop.clone(), sock.clone(), link.clone());
+        std::thread::spawn(move || match client_main(&cfg, &stop, &sock, &link, &log) {
             // "Disconnected" alone = the user's own Disconnect; with a reason the GUI shows
             // the client as disconnected in a warning color.
             Ok(()) => log.status("Disconnected"),
@@ -999,6 +1021,7 @@ pub fn start_client(cfg: ClientConfig, log: Logger) -> TunnelHandle {
         password: Arc::default(),
         sock,
         active: Arc::default(),
+        link,
     }
 }
 
@@ -1093,6 +1116,7 @@ fn client_main(
     cfg: &ClientConfig,
     stop: &Arc<AtomicBool>,
     sock: &Mutex<Option<TcpStream>>,
+    link: &Mutex<ClientLink>,
     log: &Logger,
 ) -> io::Result<()> {
     log.status("Connecting...");
@@ -1140,7 +1164,13 @@ fn client_main(
         log.status(format!("Connected to {peer} via '{}'", l2::client_adapter_name()));
         // Lets TunnelHandle::stop cut a stalled connection instead of waiting for timeouts.
         *sock.lock().unwrap() = stream.shutdown_handle().ok();
-        match run_session(stream, port.clone(), stop, None, log) {
+        {
+            let mut l = link.lock().unwrap();
+            (l.peer, l.since) = (Some(peer), Some(Instant::now()));
+        }
+        let end = run_session(stream, port.clone(), stop, None, log);
+        link.lock().unwrap().since = None;
+        match end {
             End::Stopped => {
                 log.info("Disconnected.");
                 break Ok(());
@@ -1164,6 +1194,7 @@ fn client_main(
             Some(Ok((s, p))) => {
                 log.info("Reconnected; forwarding resumed.");
                 (stream, peer) = (s, p);
+                link.lock().unwrap().reconnects += 1;
             }
         }
     };

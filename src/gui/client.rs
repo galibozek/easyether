@@ -208,18 +208,38 @@ impl ClientTab {
             .split_once(" - retrying")
             .filter(|_| running)
             .map(|(_, rest)| format!("retrying{rest}"));
+        let link = self
+            .worker
+            .handle
+            .as_ref()
+            .filter(|_| running)
+            .map(|h| h.client_link())
+            .unwrap_or_default();
         let p = widgets::pal(ui);
         widgets::status_bar(
             ui,
             |ui| {
+                // Where we are connected, for how long, and how stable it has been; the tab
+                // shows the state itself.
                 widgets::muted(ui, "Server");
                 if self.host.trim().is_empty() {
                     widgets::truncated(ui, "-", p.muted, false);
                 } else {
                     widgets::truncated(ui, server, p.text, true);
                 }
+                if let Some(since) = link.since {
+                    widgets::muted(ui, format!("connected {}", crate::log::format_uptime(since.elapsed())));
+                }
                 if let Some(retry) = retry {
                     widgets::truncated(ui, retry, p.warn, false);
+                }
+                if link.reconnects > 0 {
+                    let text = match link.reconnects {
+                        1 => "reconnected once".to_string(),
+                        n => format!("reconnected {n} times"),
+                    };
+                    widgets::muted(ui, text)
+                        .on_hover_text("Connection losses since Connect, each followed by an automatic reconnect.");
                 }
             },
             |ui| {
