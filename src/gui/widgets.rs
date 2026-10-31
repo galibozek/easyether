@@ -90,7 +90,7 @@ pub fn style(ctx: &egui::Context) {
 }
 
 /// What a tab shows about its side of the tunnel.
-/// A running side's tab badge: a dot in the state's color, then download, upload and latency,
+/// A running side's tab badge: download, upload and latency in the state's color,
 /// each "-" until known (waiting for a client, connecting).
 pub struct Badge {
     pub activity: Activity,
@@ -141,8 +141,8 @@ fn paint_arrow(painter: &egui::Painter, right: f32, y: f32, color: Color32, up: 
     right - w
 }
 
-/// Tab badge, right-aligned at (`right`, `y`): `● ↓ rx ↑ tx · rtt`, with "-" for what is not
-/// known yet.
+/// Tab badge, right-aligned at (`right`, `y`): `↓ rx ↑ tx · rtt` in the state's color, with "-"
+/// for what is not known yet.
 pub fn paint_badge(painter: &egui::Painter, right: f32, y: f32, color: Color32, badge: &Badge) {
     let font = egui::FontId::proportional(12.5);
     let text_right = |x: f32, s: &str| -> f32 {
@@ -163,17 +163,7 @@ pub fn paint_badge(painter: &egui::Painter, right: f32, y: f32, color: Color32, 
     text_right(x, &rate(badge.traffic.map(|t| t.1)));
     x = paint_arrow(painter, x - RATE_SLOT - 3.0, y, color, true) - 7.0;
     text_right(x, &rate(badge.traffic.map(|t| t.0)));
-    x = paint_arrow(painter, x - RATE_SLOT - 3.0, y, color, false);
-    paint_dot(painter, egui::pos2(x - 9.0, y), color, true);
-}
-
-/// Status dot drawn with shapes (independent of emoji fonts): filled when active, ring when off.
-pub fn paint_dot(painter: &egui::Painter, center: egui::Pos2, color: Color32, filled: bool) {
-    if filled {
-        painter.circle_filled(center, 4.0, color);
-    } else {
-        painter.circle_stroke(center, 3.5, Stroke::new(1.5_f32, color));
-    }
+    paint_arrow(painter, x - RATE_SLOT - 3.0, y, color, false);
 }
 
 fn paint_sun(painter: &egui::Painter, c: egui::Pos2, color: Color32) {
