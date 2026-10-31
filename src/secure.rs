@@ -19,7 +19,7 @@ use rustls::{ClientConfig, ClientConnection, Connection, DigitallySignedStruct, 
 use rustls::{ServerConnection, SignatureScheme, StreamOwned};
 use spake2::{Ed25519Group, Identity, Password, Spake2};
 
-use crate::proto;
+use crate::proto::{self, ClientId};
 
 const SPAKE_ID: &[u8] = b"easyether-v1";
 /// Appended to a TLS protocol error when the server is probably not in Secure mode.
@@ -158,21 +158,32 @@ pub enum Authenticated {
     Tls {
         s: Box<StreamOwned<ServerConnection, TcpStream>>,
         server_tag: Vec<u8>,
+        client_id: ClientId,
     },
-    Plain(TcpStream),
+    Plain {
+        tcp: TcpStream,
+        client_id: ClientId,
+    },
 }
 
 impl Authenticated {
+    /// The client's id: the same for all reconnects of one client run.
+    pub fn client_id(&self) -> ClientId {
+        match self {
+            Authenticated::Tls { client_id, .. } | Authenticated::Plain { client_id, .. } => *client_id,
+        }
+    }
+
     /// Sends the final confirmation and switches to frame exchange.
     pub fn accept(self) -> io::Result<SecureStream> {
         match self {
-            Authenticated::Tls { mut s, server_tag } => {
+            Authenticated::Tls { mut s, server_tag, .. } => {
                 proto::write_tagged(&mut *s, proto::MAGIC_OK, &server_tag)?;
                 let s = *s;
                 SecureStream::new(Some(Connection::Server(s.conn)), s.sock)
             }
-            Authenticated::Plain(mut tcp) => {
-                proto::write_hello(&mut tcp, proto::MAGIC_SERVER)?;
+            Authenticated::Plain { mut tcp, .. } => {
+                proto::write_tagged(&mut tcp, proto::MAGIC_OK, &[])?;
                 SecureStream::new(None, tcp)
             }
         }
@@ -181,9 +192,22 @@ impl Authenticated {
     pub fn reject(self, message: &str) {
         let _ = match self {
             Authenticated::Tls { mut s, .. } => proto::write_error(&mut *s, message),
-            Authenticated::Plain(mut tcp) => proto::write_error(&mut tcp, message),
+            Authenticated::Plain { mut tcp, .. } => proto::write_error(&mut tcp, message),
         };
     }
+}
+
+fn read_client_id(r: &mut impl Read) -> io::Result<ClientId> {
+    let mut id = ClientId::default();
+    r.read_exact(&mut id)?;
+    Ok(id)
+}
+
+/// A fresh random client id, made once per client run.
+pub fn new_client_id() -> ClientId {
+    let mut id = ClientId::default();
+    random_fill(&mut id);
+    id
 }
 
 /// Server handshake. `password: None` is the insecure mode (plain TCP, no password).
@@ -217,7 +241,12 @@ pub fn server_handshake(tcp: TcpStream, id: &ServerIdentity, password: Option<&s
                 )?;
                 return Err(other(format!("client uses unsupported protocol version {ver}")));
             }
-            return Ok(ServerHandshake::Authenticated(Authenticated::Plain(tcp)));
+            // The client sends its id only after this hello, so every error above is written
+            // with nothing unread on the socket (unread data turns the close into RST, which
+            // Windows lets discard the reply before the client reads it).
+            proto::write_hello(&mut tcp, proto::MAGIC_SERVER)?;
+            let client_id = read_client_id(&mut tcp)?;
+            return Ok(ServerHandshake::Authenticated(Authenticated::Plain { tcp, client_id }));
         }
         // A TLS client cannot read this text, but the non-TLS bytes make its TLS layer fail
         // with a protocol error (rather than a bare EOF), which it reports as a Secure mismatch.
@@ -257,6 +286,11 @@ pub fn server_handshake(tcp: TcpStream, id: &ServerIdentity, password: Option<&s
 
     let mut client_tag = [0u8; 32];
     s.read_exact(&mut client_tag)?;
+    // Read with the tag, before checking it: it is sent together with the tag, and closing
+    // with it unread would make the kernel send RST, which can discard the "Wrong password"
+    // reply below before the client reads it (the client would then keep retrying). It is
+    // only used once the password is proven.
+    let client_id = read_client_id(&mut s)?;
     if !confirmation_ok(&key, b"client", &id.fingerprint, &client_tag) {
         // Slow down guessing; the caller counts failures.
         std::thread::sleep(std::time::Duration::from_secs(1));
@@ -267,11 +301,13 @@ pub fn server_handshake(tcp: TcpStream, id: &ServerIdentity, password: Option<&s
     Ok(ServerHandshake::Authenticated(Authenticated::Tls {
         s: Box::new(s),
         server_tag,
+        client_id,
     }))
 }
 
 /// Client handshake. `password: None` is the insecure mode (plain TCP, no password).
-pub fn client_handshake(tcp: TcpStream, password: Option<&str>) -> io::Result<SecureStream> {
+/// `client_id` stays the same across this client's reconnects (see `new_client_id`).
+pub fn client_handshake(tcp: TcpStream, password: Option<&str>, client_id: &ClientId) -> io::Result<SecureStream> {
     let Some(password) = password else {
         let mut tcp = tcp;
         proto::write_hello(&mut tcp, proto::MAGIC_CLIENT_PLAIN)?;
@@ -279,6 +315,8 @@ pub fn client_handshake(tcp: TcpStream, password: Option<&str>) -> io::Result<Se
         if ver != proto::VERSION {
             return Err(other(format!("server uses unsupported protocol version {ver}")));
         }
+        tcp.write_all(client_id)?;
+        proto::read_tag(&mut tcp, proto::MAGIC_OK)?;
         return SecureStream::new(None, tcp);
     };
     let config = ClientConfig::builder_with_provider(provider())
@@ -320,6 +358,7 @@ pub fn client_handshake(tcp: TcpStream, password: Option<&str>) -> io::Result<Se
 
     let client_tag = confirmation(&key, b"client", &fingerprint);
     s.write_all(&client_tag)?;
+    s.write_all(client_id)?;
     s.flush()?;
     proto::read_tag(&mut s, proto::MAGIC_OK)?;
     let mut server_tag = [0u8; 32];
@@ -545,7 +584,7 @@ mod tests {
             }
         });
         let client = (|| {
-            let s = client_handshake(TcpStream::connect(addr)?, client_pw)?;
+            let s = client_handshake(TcpStream::connect(addr)?, client_pw, &new_client_id())?;
             s.send(b"ping")?;
             let mut buf = Vec::new();
             while buf.len() < 4 {
@@ -592,7 +631,7 @@ mod tests {
             }
             assert_eq!(echo, payload);
         });
-        let c = client_handshake(TcpStream::connect(addr).unwrap(), Some("abcd1234")).unwrap();
+        let c = client_handshake(TcpStream::connect(addr).unwrap(), Some("abcd1234"), &new_client_id()).unwrap();
         let mut got = Vec::new();
         while got.len() < expected.len() {
             assert!(c.recv(&mut got).unwrap() > 0);
