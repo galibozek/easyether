@@ -251,11 +251,13 @@ struct Counters {
 
 /// Round trip shown while our latest ping is unanswered: the measured one, or the time it has
 /// been waiting if that is longer (so a stalled link shows a growing latency, not an old one).
+/// Before the first pong the wait is shown only once it is clearly a stall, not as a guess.
 fn shown_rtt(measured_us: u64, waiting: Option<Duration>) -> Option<Duration> {
     let measured = (measured_us > 0).then(|| Duration::from_micros(measured_us));
     match (measured, waiting) {
         (Some(m), Some(w)) => Some(m.max(w)),
-        (m, w) => m.or(w),
+        (None, Some(w)) if w >= Duration::from_secs(1) => Some(w),
+        (m, _) => m,
     }
 }
 
@@ -302,13 +304,15 @@ fn run_session(
             let mut last_send = Instant::now();
             let mut last_ping = Instant::now();
             let end = loop {
-                // A ping once a second, for the latency shown by the reporter.
-                if last_ping.elapsed() >= Duration::from_secs(1) {
+                // A ping once a second, for the latency shown by the reporter, but never while
+                // one is still unanswered: a new one would replace it and a round trip near or
+                // above a second could never be measured. Pings and pongs are not counted as
+                // throughput, so an idle tunnel shows 0 B/s.
+                if last_ping.elapsed() >= Duration::from_secs(1) && counters.last_ping.load(Ordering::Relaxed) == 0 {
                     last_ping = Instant::now();
                     let token = (base.elapsed().as_nanos() as u64).max(1);
                     counters.last_ping.store(token, Ordering::Relaxed);
                     proto::encode_ping(token, &mut buf);
-                    counters.tx_bytes.fetch_add(buf.len() as u64, Ordering::Relaxed);
                     if let Err(e) = stream.send(&buf) {
                         break End::Peer(e.to_string());
                     }
@@ -336,7 +340,6 @@ fn run_session(
                     let hold = arrived.elapsed().min(polling.elapsed());
                     let hold_us = hold.as_micros().min(u32::MAX as u128) as u32;
                     proto::encode_pong(token, hold_us, &mut buf);
-                    counters.tx_bytes.fetch_add(buf.len() as u64, Ordering::Relaxed);
                     if let Err(e) = stream.send(&buf) {
                         break End::Peer(e.to_string());
                     }
@@ -357,6 +360,8 @@ fn run_session(
                     }
                     r
                 } else if last_send.elapsed() >= KEEPALIVE {
+                    // Normally the pings keep the link busy; this covers a ping left unanswered
+                    // for long (the peer must still hear from us within its LINK_TIMEOUT).
                     proto::encode_batch(&[], &mut buf);
                     stream.send(&buf)
                 } else {
@@ -436,9 +441,11 @@ fn run_session(
                 Ok(None) => break,
                 Ok(Some(proto::Msg::Close)) => break 'outer End::PeerClosed,
                 Ok(Some(proto::Msg::Ping(token))) => {
+                    counters.rx_bytes.fetch_sub(proto::PING_LEN as u64, Ordering::Relaxed);
                     *counters.pending_pong.lock().unwrap() = Some((token, Instant::now()));
                 }
                 Ok(Some(proto::Msg::Pong { token, hold_us })) => {
+                    counters.rx_bytes.fetch_sub(proto::PONG_LEN as u64, Ordering::Relaxed);
                     // Only the pong to our latest ping counts; a token that is not ours (or
                     // would overflow the clock) is ignored. Taking the token in one step means
                     // a newer ping sent meanwhile stays unanswered.
@@ -1388,7 +1395,8 @@ mod tests {
         assert_eq!(shown_rtt(5_000, None), Some(ms(5)));
         assert_eq!(shown_rtt(5_000, Some(ms(2))), Some(ms(5)));
         assert_eq!(shown_rtt(5_000, Some(ms(1500))), Some(ms(1500)));
-        assert_eq!(shown_rtt(0, Some(ms(800))), Some(ms(800)));
+        assert_eq!(shown_rtt(0, Some(ms(800))), None);
+        assert_eq!(shown_rtt(0, Some(ms(1500))), Some(ms(1500)));
     }
 
     /// The tunnel socket keeps OS-tuned buffers and, on Linux, a bounded not-yet-sent queue.
