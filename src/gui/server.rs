@@ -251,15 +251,18 @@ impl ServerTab {
         });
 
         let address = format!("{}:{}", self.local_ip, self.port.trim());
-        let client = self.worker.handle.as_ref().and_then(|h| h.client_addr());
+        let client = self.worker.handle.as_ref().and_then(|h| h.client_session());
         let p = widgets::pal(ui);
         widgets::status_bar(
             ui,
             |ui| {
-                // Who is connected; the tab shows the state itself.
+                // Who is connected and for how long; the tab shows the state itself.
                 widgets::muted(ui, "Client");
                 match client {
-                    Some(addr) if running => widgets::truncated(ui, addr.to_string(), p.text, true),
+                    Some((addr, since)) if running => {
+                        widgets::truncated(ui, addr.to_string(), p.text, true);
+                        widgets::muted(ui, format!("connected {}", crate::log::format_uptime(since.elapsed())));
+                    }
                     // Not on the tab: the shared adapter vanished (USB unplugged...).
                     _ if running && self.worker.status.starts_with("Adapter unavailable") => {
                         widgets::truncated(ui, "adapter unavailable - waiting for it to come back", p.warn, false)

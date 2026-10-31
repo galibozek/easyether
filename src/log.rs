@@ -94,6 +94,18 @@ impl Logger {
     }
 }
 
+/// "45 s", "12 min 03 s", "2 h 05 min": how long a connection has been up.
+pub fn format_uptime(d: std::time::Duration) -> String {
+    let s = d.as_secs();
+    if s < 60 {
+        format!("{s} s")
+    } else if s < 3600 {
+        format!("{} min {:02} s", s / 60, s % 60)
+    } else {
+        format!("{} h {:02} min", s / 3600, s % 3600 / 60)
+    }
+}
+
 /// "0.4 ms", "23 ms", "1.2 s": a round-trip time as shown next to the throughput.
 pub fn format_rtt(rtt: std::time::Duration) -> String {
     let ms = rtt.as_secs_f64() * 1000.0;
@@ -115,5 +127,21 @@ pub fn format_rate(bytes_per_sec: u64) -> String {
         format!("{:.1} KB/s", b / 1000.0)
     } else {
         format!("{:.2} MB/s", b / 1_000_000.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn durations_as_shown() {
+        assert_eq!(format_uptime(Duration::from_secs(45)), "45 s");
+        assert_eq!(format_uptime(Duration::from_secs(12 * 60 + 3)), "12 min 03 s");
+        assert_eq!(format_uptime(Duration::from_secs(2 * 3600 + 5 * 60 + 59)), "2 h 05 min");
+        assert_eq!(format_rtt(Duration::from_micros(420)), "0.4 ms");
+        assert_eq!(format_rtt(Duration::from_millis(23)), "23 ms");
+        assert_eq!(format_rtt(Duration::from_millis(1234)), "1.2 s");
     }
 }
