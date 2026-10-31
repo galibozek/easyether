@@ -1,6 +1,6 @@
 [package]
 name = "easyether"
-version = "0.6.1"
+version = "0.6.2"
 edition = "2024"
 description = "Peer-to-peer Ethernet (L2) sharing over LAN, using SoftEther SeLow/Neo drivers on Windows"
 license = "GPL-3.0-or-later"
