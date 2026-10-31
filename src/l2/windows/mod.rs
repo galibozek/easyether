@@ -47,16 +47,14 @@ pub fn server_opener(id: &str, log: &Logger) -> crate::l2::Opener {
         if e.kind() != io::ErrorKind::NotFound {
             return Err(e);
         }
-        let Some(other) = mac
-            .and_then(selow::guid_by_mac)
-            .filter(|g| !g.eq_ignore_ascii_case(&current))
-        else {
+        let Some(mac) = mac else { return Err(e) };
+        let Some(other) = selow::guid_by_mac(mac).filter(|g| !g.eq_ignore_ascii_case(&current)) else {
             return Err(e);
         };
         let p = selow::open(&other, &log)?;
         log.info(format!(
             "The shared adapter came back as a new device ({other}, same MAC {}); using it.",
-            super::format_mac(&mac.unwrap_or_default())
+            super::format_mac(&mac)
         ));
         *guid.lock().unwrap() = other;
         Ok(Box::new(p))
