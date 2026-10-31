@@ -90,7 +90,7 @@ impl ServerTab {
 
     /// Forgets how the last run ended ("Error"), once the other side has been started.
     pub fn clear_outcome(&mut self) {
-        if !self.is_running() {
+        if !self.is_running() && self.worker.status != "Stopped" {
             self.worker.status = "Stopped".into();
         }
     }
@@ -101,7 +101,12 @@ impl ServerTab {
         use widgets::{Activity, Badge};
         if !self.is_running() {
             None
-        } else if self.worker.status.contains("client connected") {
+        } else if self
+            .worker
+            .handle
+            .as_ref()
+            .is_some_and(|h| h.client_session().is_some())
+        {
             Some(Badge::new(Activity::On).traffic(self.worker.traffic, self.worker.rtt))
         } else {
             Some(Badge::new(Activity::Pending))
