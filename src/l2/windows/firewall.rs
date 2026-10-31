@@ -127,6 +127,15 @@ fn check(port: u16, exe: &Path, log: &Logger) {
         return;
     }
     let mut problems = 0;
+    // A rule limited to profiles whose firewall is off has no effect.
+    let in_effect = |r: &Rule| {
+        let only = r.profiles();
+        only.is_empty()
+            || profiles
+                .iter()
+                .any(|p| p.enabled && only.iter().any(|o| o.eq_ignore_ascii_case(p.name)))
+    };
+    let blocking = |r: &Rule| r.blocks(port, &exe_str, env) && in_effect(r);
 
     let local = rules(LOCAL_POLICY);
     if !local.iter().any(|r| r.name() == RULE && r.allows(port, &exe_str, env)) {
@@ -146,7 +155,7 @@ fn check(port: u16, exe: &Path, log: &Logger) {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    for r in local.iter().filter(|r| r.blocks(port, &exe_str, env)) {
+    for r in local.iter().filter(|r| blocking(r)) {
         let from_prompt = r.app().is_some() && !file_name.is_empty() && r.name().eq_ignore_ascii_case(&file_name);
         let allow_twin = local
             .iter()
@@ -165,7 +174,7 @@ fn check(port: u16, exe: &Path, log: &Logger) {
             profile_note(r)
         ));
     }
-    for r in rules(GROUP_POLICY).iter().filter(|r| r.blocks(port, &exe_str, env)) {
+    for r in rules(GROUP_POLICY).iter().filter(|r| blocking(r)) {
         problems += 1;
         log.warn(format!(
             "Windows Firewall: group policy rule '{}' blocks TCP port {port}{}; ask your administrator to allow it.",

@@ -388,7 +388,11 @@ fn run_session(
             let (mut last_report, mut prev_tx, mut prev_rx) = (Instant::now(), 0u64, 0u64);
             let mut last_shown = ((0u64, 0u64), None::<u64>);
             while !done.load(Ordering::SeqCst) {
-                std::thread::sleep(Duration::from_millis(100));
+                // Woken at once when the session ends (see below), so the end is not delayed.
+                std::thread::park_timeout(Duration::from_millis(100));
+                if done.load(Ordering::SeqCst) {
+                    break;
+                }
                 let elapsed = last_report.elapsed();
                 if elapsed < Duration::from_secs(1) {
                     continue;
@@ -478,6 +482,7 @@ fn run_session(
     stream.shutdown();
     let tx_end = tx.join().unwrap_or(End::Peer("sender thread panicked".into()));
     // Joined first, so no late report follows the reset.
+    reporter.thread().unpark();
     let _ = reporter.join();
     log.traffic(0, 0, None);
 
