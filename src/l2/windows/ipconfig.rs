@@ -47,6 +47,48 @@ fn neo_luid() -> io::Result<NET_LUID_LH> {
     Ok(luid)
 }
 
+/// Usable IPv4 addresses of all adapters but loopback, with the adapter's name.
+pub fn local_ipv4() -> Vec<(String, Ipv4Addr)> {
+    let mut table: *mut ffi::MIB_UNICASTIPADDRESS_TABLE = std::ptr::null_mut();
+    // SAFETY: on success the table is allocated by IP Helper and freed below.
+    if unsafe { ffi::GetUnicastIpAddressTable(AF_INET, &mut table) } != 0 {
+        return Vec::new();
+    }
+    // SAFETY: the table holds NumEntries rows; the union fields read match AF_INET rows.
+    let rows: Vec<(NET_LUID_LH, Ipv4Addr)> = unsafe {
+        std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize)
+            .iter()
+            .filter(|r| r.DadState == IpDadStatePreferred)
+            .map(|r| {
+                (
+                    r.InterfaceLuid,
+                    Ipv4Addr::from(r.Address.Ipv4.sin_addr.S_un.S_addr.to_ne_bytes()),
+                )
+            })
+            .filter(|(_, a)| !a.is_loopback())
+            .collect()
+    };
+    // SAFETY: allocated by GetUnicastIpAddressTable.
+    unsafe { ffi::FreeMibTable(table.cast()) };
+    let mut list: Vec<_> = rows
+        .into_iter()
+        .map(|(luid, a)| {
+            let mut alias = [0u16; 257];
+            // SAFETY: the buffer holds `alias.len()` UTF-16 units, NDIS_IF_MAX_STRING_SIZE + 1.
+            let r = unsafe { ffi::ConvertInterfaceLuidToAlias(&luid, alias.as_mut_ptr(), alias.len()) };
+            let len = alias.iter().position(|&c| c == 0).unwrap_or(0);
+            let name = if r == 0 {
+                String::from_utf16_lossy(&alias[..len])
+            } else {
+                String::new()
+            };
+            (name, a)
+        })
+        .collect();
+    list.sort();
+    list
+}
+
 /// The adapter's usable IPv4 addresses (duplicate detection finished).
 fn current_ipv4(luid: u64) -> Vec<Ipv4Addr> {
     let mut table: *mut ffi::MIB_UNICASTIPADDRESS_TABLE = std::ptr::null_mut();

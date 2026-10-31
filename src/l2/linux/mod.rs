@@ -48,6 +48,17 @@ pub fn list_adapters() -> io::Result<Vec<AdapterInfo>> {
     Ok(list)
 }
 
+/// IPv4 addresses of all interfaces but loopback, by interface name.
+pub fn local_ipv4() -> Vec<(String, Ipv4Addr)> {
+    let mut list: Vec<_> = ipv4_addresses()
+        .into_iter()
+        .flat_map(|(name, addrs)| addrs.into_iter().map(move |a| (name.clone(), a)))
+        .filter(|(_, a)| !a.is_loopback())
+        .collect();
+    list.sort();
+    list
+}
+
 fn ipv4_addresses() -> HashMap<String, Vec<Ipv4Addr>> {
     let mut map: HashMap<String, Vec<Ipv4Addr>> = HashMap::new();
     let mut ifap: *mut libc::ifaddrs = std::ptr::null_mut();
