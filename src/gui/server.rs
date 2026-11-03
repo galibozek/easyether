@@ -153,8 +153,10 @@ impl ServerTab {
                 // The virtual adapter that will carry the client's network.
                 ui.vertical(|ui| {
                     widgets::caption(ui, "Local end");
+                    // As tall as the fields of the other mode and of the client tab, so the
+                    // rows below sit at the same height everywhere.
                     ui.horizontal(|ui| {
-                        ui.set_min_height(32.0);
+                        ui.set_min_height(ui.spacing().interact_size.y);
                         self.net.summary(ui, settings, !running, 150.0);
                     });
                 });

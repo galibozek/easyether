@@ -193,9 +193,9 @@ impl ClientTab {
                     self.connect(settings);
                 }
             });
-            // One button that toggles: Connect while off, Disconnect while running.
-            ui.vertical(|ui| {
-                widgets::caption(ui, " ");
+            // One button that toggles: Connect while off, Disconnect while running. At the
+            // right end, where the server tab has its button.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Max), |ui| {
                 let size = egui::vec2(104.0, 32.0);
                 if running {
                     if ui.add(widgets::secondary_button("Disconnect").min_size(size)).clicked() {
@@ -211,6 +211,9 @@ impl ClientTab {
         // reverse the adapter to share.
         ui.horizontal(|ui| {
             ui.set_min_height(widgets::SETTINGS_ROW_HEIGHT);
+            // Compact controls, as in the server tab's settings row, so both tabs have the
+            // same row heights and nothing shifts when switching tabs.
+            ui.spacing_mut().interact_size.y = 22.0;
             if shares {
                 widgets::caption(ui, "Adapter");
                 let width = (ui.available_width() - 110.0).max(160.0);
