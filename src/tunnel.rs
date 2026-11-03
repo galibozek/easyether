@@ -33,7 +33,8 @@ const STALE_SESSION: Duration = LINK_TIMEOUT;
 /// A send that blocked this long means the link stalled badly; frames queued in the adapter
 /// meanwhile are treated as stale and dropped (higher layers have retransmitted by then).
 /// Shorter blips are simply delivered late, which is what TCP inside the tunnel prefers.
-const STALL: Duration = Duration::from_secs(2);
+/// 3 s so latency spikes on LTE (and VPNs over it) are ridden out without losing frames.
+const STALL: Duration = Duration::from_secs(3);
 /// Linux: at most this much not-yet-sent data waits in the tunnel socket (TCP_NOTSENT_LOWAT).
 /// Bounds the queue in front of diagnostic frames under bulk traffic; data in flight is not
 /// limited, so throughput is not either.
