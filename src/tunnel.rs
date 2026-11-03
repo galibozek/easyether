@@ -129,11 +129,6 @@ impl TunnelHandle {
         }
     }
 
-    /// Server only: whether a client session is running.
-    pub fn has_client(&self) -> bool {
-        self.active.lock().unwrap().is_some()
-    }
-
     /// Server only: the connected client's address and since when it is connected, if any.
     pub fn client_session(&self) -> Option<(SocketAddr, Instant)> {
         self.active.lock().unwrap().as_ref().map(|s| (s.peer, s.since))
@@ -147,6 +142,111 @@ impl TunnelHandle {
     /// Client only: the current connection.
     pub fn client_link(&self) -> ClientLink {
         *self.link.lock().unwrap()
+    }
+
+    /// The running session's peer and since when it runs, for either kind of worker.
+    pub fn session(&self) -> Option<(SocketAddr, Instant)> {
+        self.client_session().or_else(|| {
+            let l = self.client_link();
+            Some((l.peer?, l.since?))
+        })
+    }
+}
+
+/// What a worker forwards the tunnel's frames to. Independent of the connection's direction:
+/// the side that listens (password, certificate) may share its adapter or use the virtual
+/// one, and so may the side that connects. The usual setup is a sharing computer that
+/// listens; the reverse one (the sharing computer connects out) is for when only the side
+/// with the virtual adapter can be reached, e.g. it has the public IP address.
+pub enum Device {
+    /// A physical adapter, shared.
+    Share { id: String, name: String },
+    /// The virtual adapter, with a static IPv4 or DHCP.
+    Virtual {
+        mac: [u8; 6],
+        static_ipv4: Option<(Ipv4Addr, u8)>,
+    },
+}
+
+impl Device {
+    fn shares(&self) -> bool {
+        matches!(self, Device::Share { .. })
+    }
+
+    /// Who is at the other end of a connecting side, for messages.
+    fn peer_noun(&self) -> &'static str {
+        if self.shares() { "server" } else { "sharing computer" }
+    }
+
+    /// The adapter as named in messages.
+    fn adapter_name(&self) -> &str {
+        match self {
+            Device::Share { name, .. } => name,
+            Device::Virtual { .. } => l2::client_adapter_name(),
+        }
+    }
+
+    /// Opens the adapter. The virtual one also gets its route priority and IPv4, again after a
+    /// reopen, and loses them when the returned value is dropped.
+    fn open(&self, log: &Logger) -> io::Result<OpenDevice> {
+        match self {
+            Device::Share { id, name } => Ok(OpenDevice {
+                virt: None,
+                port: Arc::new(l2::open_server(id, name, log)?),
+            }),
+            Device::Virtual { mac, static_ipv4 } => {
+                let port = Arc::new(l2::open_client(*mac, log)?);
+                l2::prefer_local_networks(log);
+                let virt = VirtualSetup {
+                    ip_guard: Arc::new(Mutex::new(configure_client_ip(*static_ipv4, log))),
+                    closing: Arc::new(AtomicBool::new(false)),
+                };
+                // A restarted adapter (driver restart, adapter disabled and enabled) comes back
+                // without its route priority and addresses: set them up again. The old guard
+                // goes first, so a static address is removed and added rather than left twice.
+                let (ip_guard, closing, log, static_ipv4) =
+                    (virt.ip_guard.clone(), virt.closing.clone(), log.clone(), *static_ipv4);
+                port.set_on_reopen(move || {
+                    if closing.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    l2::prefer_local_networks(&log);
+                    let mut guard = ip_guard.lock().unwrap();
+                    // Checked again under the lock that the teardown also takes, so either this
+                    // hook configures before the teardown removes it, or it sees the flag and
+                    // stops.
+                    if closing.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    *guard = None;
+                    *guard = configure_client_ip(static_ipv4, &log);
+                });
+                Ok(OpenDevice { virt: Some(virt), port })
+            }
+        }
+    }
+}
+
+/// An opened `Device`. Fields drop in declaration order: the virtual adapter's IP
+/// configuration is removed while the adapter still exists.
+struct OpenDevice {
+    #[allow(dead_code)] // held for its Drop
+    virt: Option<VirtualSetup>,
+    port: Arc<ResilientPort>,
+}
+
+/// The virtual adapter's IPv4 configuration, undone on drop.
+struct VirtualSetup {
+    ip_guard: Arc<Mutex<Option<Box<dyn Send>>>>,
+    /// Set when closing: a reopen hook still running then must not configure the adapter
+    /// again (it runs on its own thread and can outlive the worker).
+    closing: Arc<AtomicBool>,
+}
+
+impl Drop for VirtualSetup {
+    fn drop(&mut self) {
+        self.closing.store(true, Ordering::SeqCst);
+        self.ip_guard.lock().unwrap().take();
     }
 }
 
@@ -600,9 +700,9 @@ fn with_deadline<T>(tcp: &TcpStream, limit: Duration, f: impl FnOnce() -> T) -> 
 
 // ----------------------------------------------------------------------------- server
 
+/// The listening side: waits for the other side to connect.
 pub struct ServerConfig {
-    pub adapter_id: String,
-    pub adapter_name: String,
+    pub device: Device,
     pub port: u16,
     /// TLS + password; when false the tunnel is plain TCP without a password.
     pub secure: bool,
@@ -728,6 +828,8 @@ struct Server {
     secure: bool,
     password: Arc<Mutex<String>>,
     port: Arc<ResilientPort>,
+    /// Whether `port` is a shared physical adapter (otherwise the virtual one), for messages.
+    shares: bool,
     stop: Arc<AtomicBool>,
     log: Logger,
     abuse: Mutex<Abuse>,
@@ -751,12 +853,21 @@ fn server_main(
     log: &Logger,
 ) -> io::Result<()> {
     // Blocked IPs and wrong-password counters live in this run only, so Stop/Share resets them.
-    log.info(format!(
-        "Starting Ethernet sharing for adapter '{}' on TCP port {}.",
-        cfg.adapter_name, cfg.port
-    ));
+    if cfg.device.shares() {
+        log.info(format!(
+            "Starting Ethernet sharing for adapter '{}' on TCP port {}.",
+            cfg.device.adapter_name(),
+            cfg.port
+        ));
+    } else {
+        log.info(format!(
+            "Waiting on TCP port {} for a client to share its adapter (virtual adapter '{}').",
+            cfg.port,
+            cfg.device.adapter_name()
+        ));
+    }
     log.status("Starting...");
-    let port = Arc::new(l2::open_server(&cfg.adapter_id, &cfg.adapter_name, log)?);
+    let device = cfg.device.open(log)?;
     let identity = ServerIdentity::generate()?;
     l2::prepare_listen(cfg.port, log);
     let listener = listen_dual_stack(cfg.port)
@@ -778,7 +889,8 @@ fn server_main(
         identity,
         secure: cfg.secure,
         password,
-        port,
+        port: device.port.clone(),
+        shares: cfg.device.shares(),
         stop,
         log: log.clone(),
         abuse: Mutex::default(),
@@ -788,7 +900,10 @@ fn server_main(
         last_client,
         session_slot: Mutex::new(()),
     });
-    serve(listener, server)
+    let result = serve(listener, server);
+    // The virtual adapter's IP configuration goes here, while the adapter still exists.
+    drop(device);
+    result
 }
 
 /// The accept loop and the graceful stop. Separate from `server_main` (which opens the adapter
@@ -855,11 +970,18 @@ fn serve(listener: TcpListener, server: Arc<Server>) -> io::Result<()> {
 
 impl Server {
     fn idle_status(&self) {
-        if self.port.is_present() {
+        if !self.port.is_present() {
+            self.log.status("Adapter unavailable - waiting for it to come back");
+        } else if self.shares {
             self.log.status("Sharing - waiting for a client");
         } else {
-            self.log.status("Adapter unavailable - waiting for it to come back");
+            self.log.status("Waiting for a client to share its adapter");
         }
+    }
+
+    /// Who connects here, for messages.
+    fn peer_noun(&self) -> &'static str {
+        "client"
     }
 
     fn incoming(self: Arc<Self>, tcp: TcpStream, peer: SocketAddr) {
@@ -950,9 +1072,15 @@ impl Server {
             match active.as_ref() {
                 Some(cur) if cur.last_rx.lock().unwrap().elapsed() < STALE_SESSION && cur.client_id != client_id => {
                     drop(active);
-                    self.log
-                        .info(format!("Rejected {peer}: another client is connected and active."));
-                    auth.reject("The sharing computer already has a client connected.");
+                    self.log.info(format!(
+                        "Rejected {peer}: another {} is connected and active.",
+                        self.peer_noun()
+                    ));
+                    auth.reject(if self.shares {
+                        "The sharing computer already has a client connected."
+                    } else {
+                        "The server already has a client connected."
+                    });
                     return;
                 }
                 _ => active.take(),
@@ -961,11 +1089,14 @@ impl Server {
         if let Some(old) = &old {
             if old.client_id == client_id {
                 self.log.info(format!(
-                    "{peer}: the client reconnected; replacing its previous connection."
+                    "{peer}: the {} reconnected; replacing its previous connection.",
+                    self.peer_noun()
                 ));
             } else {
-                self.log
-                    .info(format!("{peer} replaces the previous (unresponsive) client session."));
+                self.log.info(format!(
+                    "{peer} replaces the previous (unresponsive) {} session.",
+                    self.peer_noun()
+                ));
             }
             // Stop flag first: within ~50 ms the old session sends Close (so that client does
             // not reconnect and fight over the slot); cut the socket only if it does not end.
@@ -1008,15 +1139,24 @@ impl Server {
             peer,
             since: Instant::now(),
         });
-        self.log
-            .info(format!("Client {peer} authenticated; Ethernet tunnel established."));
-        self.log.status(format!("Sharing - client connected ({peer})"));
+        let noun = self.peer_noun();
+        if self.shares {
+            self.log
+                .info(format!("Client {peer} authenticated; Ethernet tunnel established."));
+            self.log.status(format!("Sharing - client connected ({peer})"));
+        } else {
+            self.log.info(format!(
+                "Client {peer} authenticated; using its adapter through '{}'.",
+                l2::client_adapter_name()
+            ));
+            self.log.status(format!("Client connected ({peer})"));
+        }
         match run_session(stream, self.port.clone(), &my_stop, Some(&last_rx), &self.log) {
             End::Stopped => self.log.info(format!("Session with {peer} closed.")),
-            End::PeerClosed => self.log.info(format!("Client {peer} disconnected.")),
+            End::PeerClosed => self.log.info(format!("The {noun} {peer} disconnected.")),
             End::Peer(e) => self
                 .log
-                .warn(format!("Connection to {peer} lost: {e}. The client will reconnect.")),
+                .warn(format!("Connection to {peer} lost: {e}. The {noun} will reconnect.")),
             End::Adapter(e) => self.log.error(format!("Adapter error: {e}")),
         }
         self.clear_active(&my_stop);
@@ -1106,14 +1246,14 @@ fn canonical(peer: SocketAddr) -> SocketAddr {
 
 // ----------------------------------------------------------------------------- client
 
+/// The connecting side: connects to the listening side and reconnects after a loss.
 pub struct ClientConfig {
     pub host: String,
     pub port: u16,
     /// TLS + password; when false the tunnel is plain TCP without a password.
     pub secure: bool,
     pub password: String,
-    pub static_ipv4: Option<(Ipv4Addr, u8)>,
-    pub mac: [u8; 6],
+    pub device: Device,
 }
 
 pub fn start_client(cfg: ClientConfig, log: Logger) -> TunnelHandle {
@@ -1246,43 +1386,35 @@ fn client_main(
     let client_id = secure::new_client_id();
     // Keep trying until the server is reachable (it may not be sharing yet, the network may be
     // down for a moment); only wrong password / Secure mismatch, or Disconnect, end this.
-    let (mut stream, mut peer) = match retry_connect(cfg, &client_id, stop, log, "Server unreachable") {
+    // A shared adapter is opened first, so a wrong choice fails before the other side is
+    // bothered. The virtual adapter only once the password was accepted, so a typo does not
+    // make an adapter appear and disappear.
+    let mut device = if cfg.device.shares() {
+        Some(cfg.device.open(log)?)
+    } else {
+        None
+    };
+    let (mut stream, mut peer) = match retry_connect(cfg, &client_id, stop, log, "Unreachable") {
         Some(Ok(s)) => s,
         Some(Err(e)) => return Err(e),
         None => return Ok(()),
     };
 
-    // The virtual adapter stays open across reconnects, so the OS keeps its link, IP and routes.
-    let adapter = Arc::new(l2::open_client(cfg.mac, log)?);
-    l2::prefer_local_networks(log);
-    let ip_guard = Arc::new(Mutex::new(configure_client_ip(cfg.static_ipv4, log)));
-    // Set when the client is closing: a reopen hook still running then must not configure the
-    // adapter again (it runs on its own thread and can outlive this function).
-    let closing = Arc::new(AtomicBool::new(false));
-    {
-        // A restarted adapter (driver restart, adapter disabled and enabled) comes back without
-        // its route priority and addresses: set them up again. The old guard goes first, so a
-        // static address is removed and added rather than left twice.
-        let (ip_guard, closing, log, static_ipv4) = (ip_guard.clone(), closing.clone(), log.clone(), cfg.static_ipv4);
-        adapter.set_on_reopen(move || {
-            if closing.load(Ordering::SeqCst) {
-                return;
-            }
-            l2::prefer_local_networks(&log);
-            let mut guard = ip_guard.lock().unwrap();
-            // Checked again under the lock that the teardown below also takes, so either this
-            // hook configures before the teardown removes it, or it sees the flag and stops.
-            if closing.load(Ordering::SeqCst) {
-                return;
-            }
-            *guard = None;
-            *guard = configure_client_ip(static_ipv4, &log);
-        });
-    }
-    let port: Arc<dyn L2Port> = adapter.clone();
+    // The adapter stays open across reconnects, so the OS keeps its link, IP and routes.
+    let device = match device.take() {
+        Some(d) => d,
+        None => cfg.device.open(log)?,
+    };
+    let port: Arc<dyn L2Port> = device.port.clone();
+    let adapter = cfg.device.adapter_name().to_string();
+    let noun = cfg.device.peer_noun();
 
     let result = loop {
-        log.status(format!("Connected to {peer} via '{}'", l2::client_adapter_name()));
+        if cfg.device.shares() {
+            log.status(format!("Connected to {peer}, sharing '{adapter}'"));
+        } else {
+            log.status(format!("Connected to {peer} via '{adapter}'"));
+        }
         // Lets TunnelHandle::stop cut a stalled connection instead of waiting for timeouts.
         *sock.lock().unwrap() = stream.shutdown_handle().ok();
         {
@@ -1297,13 +1429,13 @@ fn client_main(
                 break Ok(());
             }
             End::PeerClosed => {
-                log.info("The sharing computer ended the session; disconnected.");
+                log.info(format!("The {noun} ended the session; disconnected."));
                 break Err(io::Error::new(
                     io::ErrorKind::ConnectionAborted,
-                    "the sharing computer ended the session",
+                    format!("the {noun} ended the session"),
                 ));
             }
-            End::Adapter(e) => break Err(io::Error::other(format!("virtual adapter error: {e}"))),
+            End::Adapter(e) => break Err(io::Error::other(format!("adapter '{adapter}' error: {e}"))),
             End::Peer(e) => log.warn(format!("Connection lost: {e}")),
         }
         match retry_connect(cfg, &client_id, stop, log, "Connection lost") {
@@ -1319,12 +1451,9 @@ fn client_main(
             }
         }
     };
-    // Remove the IP configuration while the adapter still exists, then close it. The flag first,
-    // so a reopen hook still running does not configure it again.
-    closing.store(true, Ordering::SeqCst);
-    ip_guard.lock().unwrap().take();
+    // Remove the IP configuration while the adapter still exists, then close it.
     drop(port);
-    drop(adapter);
+    drop(device);
     result
 }
 
@@ -1589,6 +1718,7 @@ mod tests {
                 secure,
                 password: Arc::new(Mutex::new(password.clone())),
                 port: Arc::new(port),
+                shares: true,
                 stop: stop.clone(),
                 log,
                 abuse: Mutex::default(),

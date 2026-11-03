@@ -81,6 +81,23 @@ start. The drivers it installs are signed by the SoftEther project.
    169.254.x.x when no DHCP server answers.
 3. Start the diagnostic software and select that adapter, as if the cable were plugged in locally.
 
+**Reverse (the client shares, e.g. from behind NAT)**
+
+The server always waits and the client always connects. When the car side sits behind NAT
+and the diagnostic computer has a public address, the diagnostic computer is the server and
+the car side the client that shares its adapter. Switch **Normal / Reverse** in the header to
+*Reverse* on **both** computers:
+
+1. Diagnostic computer, **Server** tab: click **Listen**; give the other side the address
+   (**My address**; your public IPv4 with the port forwarded, or the **IPv6** one) and the
+   password shown. Its virtual adapter gets the client's network.
+2. Car side, **Client** tab: enter the server's address, port and password, pick the adapter
+   to share in the row below, click **Connect**. It reconnects after a loss as usual.
+
+Security, the one-session rule and the reconnect behavior are the same; only who shares the
+adapter changes. IPv6 needs no port forwarding, but the router's IPv6 firewall must let the
+port in.
+
 Closing the window exits; while a tunnel is active it asks for confirmation first. On Windows,
 minimizing hides EasyEther in the system tray (**Open** / **Exit**). Linux has no tray icon:
 Wayland does not let a program hide or raise its own window, so it stays in the taskbar.
@@ -137,6 +154,9 @@ are. On Linux, sharing a bridge interface lifts this limitation.
 easyether --cli list
 easyether --cli server <adapter> [port] [--insecure]
 easyether --cli client <host> [port] --password <8 chars> [--ip <addr>/<prefix>] [--insecure]
+# reverse: the client shares its adapter, the server (still waiting) uses it
+easyether --cli server --reverse [port] [--ip <addr>/<prefix>] [--insecure]
+easyether --cli client <host> [port] --share <adapter> --password <8 chars> [--insecure]
 easyether --install-drivers | --uninstall-drivers          # Windows (also drivers\*.bat)
 ```
 

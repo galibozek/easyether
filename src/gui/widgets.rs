@@ -396,6 +396,62 @@ pub fn theme_switch(ui: &mut egui::Ui, current: &str) -> Option<&'static str> {
     chosen
 }
 
+/// Segmented choice with text labels, like the theme switch. Returns the newly chosen index.
+/// Sized up front and laid out left to right, so it reads the same in a right-to-left row.
+pub fn segmented(ui: &mut egui::Ui, enabled: bool, options: &[&str], selected: usize) -> Option<usize> {
+    let p = pal(ui);
+    let mut chosen = None;
+    let font = egui::FontId::proportional(13.0);
+    let widths: Vec<f32> = options
+        .iter()
+        .map(|t| ui.fonts_mut(|f| f.layout_no_wrap(t.to_string(), font.clone(), p.text).size().x) + 20.0)
+        .collect();
+    let total = widths.iter().sum::<f32>() + 2.0 * (options.len().max(1) - 1) as f32 + 6.0;
+    ui.allocate_ui_with_layout(
+        egui::vec2(total, 30.0),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            egui::Frame::new()
+                .fill(p.soft)
+                .corner_radius(14.0)
+                .inner_margin(egui::Margin::same(3))
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    ui.horizontal(|ui| {
+                        for (i, text) in options.iter().enumerate() {
+                            let is_selected = i == selected;
+                            let width = widths[i];
+                            let sense = if enabled {
+                                egui::Sense::click()
+                            } else {
+                                egui::Sense::hover()
+                            };
+                            let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 24.0), sense);
+                            let bg = if is_selected {
+                                ACCENT
+                            } else if resp.hovered() && enabled {
+                                p.stroke
+                            } else {
+                                p.soft
+                            };
+                            let mut fg = if is_selected { Color32::WHITE } else { p.muted };
+                            if !enabled && !is_selected {
+                                fg = fg.gamma_multiply(0.5);
+                            }
+                            let painter = ui.painter();
+                            painter.rect_filled(rect, 11.0, bg);
+                            painter.text(rect.center(), egui::Align2::CENTER_CENTER, *text, font.clone(), fg);
+                            if resp.clicked() && !is_selected && enabled {
+                                chosen = Some(i);
+                            }
+                        }
+                    });
+                });
+        },
+    );
+    chosen
+}
+
 /// Status line under a tab's controls. The tab itself shows the state, so this shows details:
 /// who is connected and for how long, retries, why it ended.
 pub fn status_bar(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui)) {

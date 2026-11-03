@@ -7,12 +7,17 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    /// The physical adapter last shared (by either tab).
     pub server_adapter_id: String,
     pub server_port: u16,
     pub server_secure: bool,
     pub client_host: String,
     pub client_port: u16,
     pub client_secure: bool,
+    /// Reverse: the client shares an adapter (`server_adapter_id`) and the server uses it
+    /// (virtual adapter there). The server still waits and the client connects, so a sharing
+    /// computer behind NAT can reach a public server.
+    pub reverse: bool,
     pub static_ipv4_enabled: bool,
     pub static_ipv4_address: String,
     pub static_ipv4_mask: String,
@@ -32,6 +37,7 @@ impl Default for Settings {
             client_host: String::new(),
             client_port: DEFAULT_PORT,
             client_secure: true,
+            reverse: false,
             static_ipv4_enabled: false,
             static_ipv4_address: String::new(),
             static_ipv4_mask: "255.255.255.0".into(),

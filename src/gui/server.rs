@@ -1,40 +1,26 @@
-//! Server tab: share a local Ethernet adapter.
+//! Server tab: waits for the client to connect, and either shares a local Ethernet adapter
+//! with it or uses the client's (virtual adapter here). The second mode is for a client
+//! behind NAT that shares its adapter by connecting out to this, publicly reachable, side.
 
 use eframe::egui::{self, RichText};
 
-use super::worker::{Worker, parse_port};
+use super::device::{AdapterPicker, NetSettings};
+use super::worker::{Invite, Worker, parse_port};
 use super::{Confirm, widgets};
-use crate::l2::{self, AdapterInfo};
-use crate::secure;
 use crate::settings::Settings;
 use crate::tunnel;
 
 pub struct ServerTab {
     pub(super) worker: Worker,
-    adapters: Vec<AdapterInfo>,
-    selected: Option<usize>,
+    picker: AdapterPicker,
+    net: NetSettings,
     port: String,
-    password: String,
-    local_ip: String,
-    /// All IPv4 addresses with their interface names, for the "My address" hover.
-    addresses: Vec<(String, std::net::Ipv4Addr)>,
-    /// "Copied to clipboard" after Copy or a click on the address.
-    copied: widgets::Copied,
+    /// The password and address to give the client.
+    invite: Invite,
     #[cfg(windows)]
     installer: Option<std::thread::JoinHandle<()>>,
     #[cfg(windows)]
     drivers: Option<crate::l2::windows::install::DriverStatus>,
-}
-
-/// Primary local IPv4 (no packets are sent; this only asks the routing table).
-fn local_ip() -> String {
-    std::net::UdpSocket::bind("0.0.0.0:0")
-        .and_then(|s| {
-            s.connect("192.0.2.1:9")?;
-            s.local_addr()
-        })
-        .map(|a| a.ip().to_string())
-        .unwrap_or_default()
 }
 
 impl ServerTab {
@@ -45,13 +31,10 @@ impl ServerTab {
             .info(concat!("EasyEther ", env!("CARGO_PKG_VERSION"), " started."));
         let mut tab = ServerTab {
             worker,
-            adapters: Vec::new(),
-            selected: None,
+            picker: AdapterPicker::default(),
+            net: NetSettings::default(),
             port: settings.server_port.to_string(),
-            password: secure::generate_password(),
-            local_ip: local_ip(),
-            addresses: l2::local_ipv4(),
-            copied: widgets::Copied::default(),
+            invite: Invite::new(),
             #[cfg(windows)]
             installer: None,
             #[cfg(windows)]
@@ -62,29 +45,12 @@ impl ServerTab {
     }
 
     fn refresh(&mut self, settings: &Settings) {
-        self.local_ip = local_ip();
-        self.addresses = l2::local_ipv4();
+        self.invite.refresh();
         #[cfg(windows)]
         {
             self.drivers = Some(crate::l2::windows::install::status());
         }
-        match l2::list_adapters() {
-            Ok(list) => {
-                self.adapters = list;
-                if self.adapters.is_empty() {
-                    self.worker.logger.warn("No shareable Ethernet adapters found.");
-                }
-            }
-            Err(e) => {
-                self.adapters.clear();
-                self.worker.logger.error(e.to_string());
-            }
-        }
-        self.selected = self
-            .adapters
-            .iter()
-            .position(|a| a.id == settings.server_adapter_id)
-            .or(if self.adapters.is_empty() { None } else { Some(0) });
+        self.picker.refresh(&settings.server_adapter_id, &self.worker.logger);
     }
 
     pub fn is_running(&self) -> bool {
@@ -98,41 +64,25 @@ impl ServerTab {
         }
     }
 
-    /// What the tray icon's hover text says while sharing: mode and port, the client and, once
-    /// connected, the traffic. `None` while off.
+    /// What the tray icon's hover text says while running: mode and port, the client and,
+    /// once connected, the traffic. `None` while off.
     pub fn tray_status(&self, settings: &Settings) -> Option<String> {
         if !self.is_running() {
             return None;
         }
         let mode = if settings.server_secure { "Secure" } else { "Insecure" };
-        let head = format!("Server ({mode}, port {})", self.port.trim());
-        let session = self.worker.handle.as_ref().and_then(|h| h.client_session());
-        Some(match session {
-            Some((addr, since)) => format!(
-                "{head}\nclient {addr} connected · {}\n{}",
-                crate::log::format_uptime(since.elapsed()),
-                widgets::traffic_line(self.worker.traffic, self.worker.rtt)
-            ),
-            None => format!("{head}\nwaiting for a client"),
-        })
+        let what = if settings.reverse {
+            "using the client's adapter"
+        } else {
+            "sharing"
+        };
+        let head = format!("Server ({mode}, port {}, {what})", self.port.trim());
+        Some(format!("{head}\n{}", self.worker.tray_session("waiting for a client")))
     }
 
-    /// Short state for the tab badge: the live connection, or that we wait for one. Nothing
-    /// while off; errors and other details are in the status bar only.
+    /// Short state for the tab badge: the live connection, or that we wait for one.
     pub fn badge(&self) -> Option<widgets::Badge> {
-        use widgets::{Activity, Badge};
-        if !self.is_running() {
-            None
-        } else if self
-            .worker
-            .handle
-            .as_ref()
-            .is_some_and(|h| h.client_session().is_some())
-        {
-            Some(Badge::new(Activity::On).traffic(self.worker.traffic, self.worker.rtt))
-        } else {
-            Some(Badge::new(Activity::Pending))
-        }
+        self.worker.badge()
     }
 
     pub fn poll(&mut self) {
@@ -140,24 +90,28 @@ impl ServerTab {
     }
 
     fn start(&mut self, settings: &mut Settings) {
-        let Some(adapter) = self.selected.and_then(|i| self.adapters.get(i)).cloned() else {
-            self.worker.logger.error("Choose a network adapter first.");
+        let log = &self.worker.logger;
+        let device = if settings.reverse {
+            NetSettings::device(settings, log)
+        } else {
+            self.picker.device(log).map(|(device, id)| {
+                settings.server_adapter_id = id;
+                device
+            })
+        };
+        let Some(device) = device else { return };
+        let Some(port) = parse_port(&self.port, log) else {
             return;
         };
-        let Some(port) = parse_port(&self.port, &self.worker.logger) else {
-            return;
-        };
-        settings.server_adapter_id = adapter.id.clone();
         settings.server_port = port;
         settings.save();
         let cfg = tunnel::ServerConfig {
-            adapter_id: adapter.id,
-            adapter_name: adapter.name,
+            device,
             port,
             secure: settings.server_secure,
-            password: self.password.clone(),
+            password: self.invite.password.clone(),
         };
-        self.worker.handle = Some(tunnel::start_server(cfg, self.worker.logger.clone()));
+        self.worker.handle = Some(tunnel::start_server(cfg, log.clone()));
     }
 
     pub fn stop(&mut self) {
@@ -171,88 +125,69 @@ impl ServerTab {
     /// Generates a new password. A connected client (confirmed by the user) is disconnected,
     /// since the old password is no longer valid.
     pub fn new_password(&mut self) {
-        self.password = secure::generate_password();
-        if let Some(h) = &self.worker.handle {
-            h.set_password(&self.password);
-            if h.disconnect_client() {
-                self.worker
-                    .logger
-                    .info("A new password was generated; the connected client was disconnected.");
-                return;
-            }
-        }
-        self.worker.logger.info("A new password was generated.");
-    }
-
-    /// Whether a client session is running (for the New password confirmation).
-    pub fn has_client(&self) -> bool {
-        self.is_running() && self.worker.handle.as_ref().is_some_and(|h| h.has_client())
+        self.invite.new_password(&self.worker, "client");
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui, settings: &mut Settings, confirm: &mut Option<Confirm>) {
         let running = self.is_running();
-        widgets::title(ui, "Share a local Ethernet adapter");
+        // Reverse: the client shares its adapter and this computer uses it.
+        let virt = settings.reverse;
+        widgets::title(
+            ui,
+            if virt {
+                "Use the client's Ethernet adapter"
+            } else {
+                "Share a local Ethernet adapter"
+            },
+        );
         ui.add_space(4.0);
 
         #[cfg(windows)]
         self.drivers_ui(ui);
 
         ui.horizontal(|ui| {
-            // Refresh (84) + gap (16) + port (70) + Share/Stop (96) + spacing.
-            let combo_width = (ui.available_width() - 320.0).max(160.0);
-            ui.vertical(|ui| {
-                widgets::caption(ui, "Network adapter");
-                let current = self
-                    .selected
-                    .and_then(|i| self.adapters.get(i))
-                    .map(|a| format!("{}   {}", a.name, a.detail))
-                    .unwrap_or_else(|| "(no adapter)".into());
-                // egui truncates text only to the width it is given: the box gets its own width,
-                // the list a fixed one up to the window's edge; long names (Windows) end in "…",
-                // complete on hover.
-                let list_width = ui.ctx().content_rect().right() - ui.cursor().left() - 16.0;
-                ui.add_enabled_ui(!running, |ui| {
-                    ui.set_max_width(combo_width);
-                    egui::ComboBox::from_id_salt("adapter")
-                        .width(combo_width)
-                        .truncate()
-                        .selected_text(&current)
-                        .show_ui(ui, |ui| {
-                            ui.set_width(list_width.max(combo_width));
-                            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-                            for (i, a) in self.adapters.iter().enumerate() {
-                                let name = format!("{}   {}", a.name, a.detail);
-                                ui.selectable_value(&mut self.selected, Some(i), &name)
-                                    .on_hover_text(&name);
-                            }
-                        })
-                        .response
-                        .on_hover_text(&current);
+            if virt {
+                // The virtual adapter that will carry the client's network.
+                ui.vertical(|ui| {
+                    widgets::caption(ui, "Local end");
+                    ui.horizontal(|ui| {
+                        ui.set_min_height(32.0);
+                        self.net.summary(ui, settings, !running, 150.0);
+                    });
                 });
-            });
-            // Refresh belongs to the adapter list; a gap separates it from port + Share/Stop.
-            ui.vertical(|ui| {
-                widgets::caption(ui, " ");
-                if ui.add_enabled(!running, widgets::secondary_button("Refresh")).clicked() {
-                    self.refresh(settings);
-                }
-            });
-            ui.add_space(16.0);
-            ui.vertical(|ui| {
-                widgets::caption(ui, "Port");
-                ui.add_enabled(!running, egui::TextEdit::singleline(&mut self.port).desired_width(70.0));
-            });
-            // One button that toggles: Share while off, Stop while sharing (same place and width).
-            ui.vertical(|ui| {
-                widgets::caption(ui, " ");
+            } else {
+                // Refresh (84) + gap (16) + port (70) + Share/Stop (96) + spacing.
+                let combo_width = (ui.available_width() - 320.0).max(160.0);
+                ui.vertical(|ui| {
+                    widgets::caption(ui, "Network adapter");
+                    self.picker.combo(ui, !running, combo_width);
+                });
+                // Refresh belongs to the adapter list; a gap separates it from port + Share/Stop.
+                ui.vertical(|ui| {
+                    widgets::caption(ui, " ");
+                    if ui.add_enabled(!running, widgets::secondary_button("Refresh")).clicked() {
+                        self.refresh(settings);
+                    }
+                });
+            }
+            // Port and the button at the right end, the same place in both modes.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Max), |ui| {
+                // One button that toggles: Share/Listen while off, Stop while running.
                 let size = egui::vec2(96.0, 32.0);
                 if running {
                     if ui.add(widgets::secondary_button("Stop").min_size(size)).clicked() {
                         *confirm = Some(Confirm::StopServer);
                     }
-                } else if ui.add(widgets::primary_button("Share").min_size(size)).clicked() {
+                } else if ui
+                    .add(widgets::primary_button(if virt { "Listen" } else { "Share" }).min_size(size))
+                    .clicked()
+                {
                     self.start(settings);
                 }
+                ui.vertical(|ui| {
+                    widgets::caption(ui, "Port");
+                    ui.add_enabled(!running, egui::TextEdit::singleline(&mut self.port).desired_width(70.0));
+                });
             });
         });
 
@@ -269,20 +204,8 @@ impl ServerTab {
             ui.separator();
             if settings.server_secure {
                 widgets::caption(ui, "Password");
-                ui.label(
-                    RichText::new(secure::display_password(&self.password))
-                        .monospace()
-                        .size(20.0)
-                        .strong(),
-                );
-                let copy = widgets::small_button(ui, true, "Copy");
-                if copy.clicked() {
-                    self.copied.copy(ui.ctx(), self.password.clone(), &copy);
-                }
-                let new_pw = widgets::small_button(ui, true, "New password")
-                    .on_hover_text("A connected client is disconnected, since its password stops being valid.");
-                if new_pw.clicked() {
-                    if self.has_client() {
+                if self.invite.password_ui(ui) {
+                    if self.worker.connected() {
                         *confirm = Some(Confirm::NewPassword);
                     } else {
                         self.new_password();
@@ -295,72 +218,23 @@ impl ServerTab {
                 ui.label(RichText::new("anyone who reaches this port can join").color(warn))
                     .on_hover_text("No encryption and no password. Use it only on a trusted LAN.");
             }
-            // What to give the client, on the right of the settings row: a click copies it, the
-            // hover lists every address of this computer (the client may be on another network).
-            let port = self.port.trim();
-            let address = format!("{}:{port}", self.local_ip);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let resp = ui
-                    .add(egui::Label::new(RichText::new(&address).strong()).sense(egui::Sense::click()))
-                    .on_hover_cursor(egui::CursorIcon::PointingHand);
-                // egui hides a tooltip on click; the "Copied" note replaces it meanwhile.
-                let resp = if self.copied.active() || self.addresses.is_empty() {
-                    resp
-                } else {
-                    resp.on_hover_ui(|ui| {
-                        widgets::muted(ui, "All addresses of this computer:");
-                        egui::Grid::new("my_addresses")
-                            .num_columns(2)
-                            .spacing([12.0, 2.0])
-                            // Rows default to the height of a button (30 px here); text lines need less.
-                            .min_row_height(0.0)
-                            .show(ui, |ui| {
-                                for (name, ip) in &self.addresses {
-                                    ui.label(format!("{ip}:{port}"));
-                                    widgets::muted(ui, name);
-                                    ui.end_row();
-                                }
-                            });
-                    })
-                };
-                if resp.clicked() {
-                    self.copied.copy(ui.ctx(), address.clone(), &resp);
-                }
-                widgets::caption(ui, "My address");
-            });
+            // What to give the client, on the right of the settings row.
+            self.invite.address_ui(ui, self.port.trim());
         });
-        self.copied.ui(ui);
+        self.invite.copied_ui(ui);
 
-        let handle = self.worker.handle.as_ref();
-        let client = handle.and_then(|h| h.client_session());
-        let last = handle.and_then(|h| h.last_client());
-        let status = self.worker.status.as_str();
         let p = widgets::pal(ui);
-        let uptime = |since: std::time::Instant| crate::log::format_uptime(since.elapsed());
+        let off = if virt { "not listening" } else { "not sharing" };
+        let (text, color) = self.worker.listen_status(p, running, "client", off);
         widgets::status_bar(ui, |ui| {
             // Details the tab does not show: who is connected and for how long, who left,
             // and what is wrong. One color for the message, the warning color for problems.
             widgets::muted(ui, "Status");
-            let (text, color) = match client {
-                Some((addr, since)) if running => (format!("client {addr} connected · {}", uptime(since)), p.text),
-                _ if running && status.starts_with("Adapter unavailable") => {
-                    ("adapter unplugged · waiting for it".into(), p.warn)
-                }
-                _ if running && status.starts_with("Starting") => ("starting…".into(), p.text),
-                _ if running => match last {
-                    Some((addr, left)) => (
-                        format!("client {} left {} ago · waiting", addr.ip(), uptime(left)),
-                        p.text,
-                    ),
-                    None => ("waiting for a client".into(), p.text),
-                },
-                _ if status.starts_with("Error") => ("could not start · see log".into(), p.warn),
-                _ => ("not sharing".into(), p.text),
-            };
             widgets::truncated(ui, text, color);
         });
 
         self.worker.log.ui(ui, "Server Log");
+        self.net.dialog(ui.ctx(), settings);
     }
 
     #[cfg(windows)]
@@ -414,8 +288,8 @@ impl ServerTab {
         #[cfg(windows)]
         if let Some(st) = &self.drivers {
             return [
-                (!st.selow, "SeLow (needed for Server)"),
-                (!st.neo, "virtual adapter VPN127 (needed for Client)"),
+                (!st.selow, "SeLow (needed to share an adapter)"),
+                (!st.neo, "virtual adapter VPN127 (needed to use a shared one)"),
             ]
             .into_iter()
             .filter(|(m, _)| *m)

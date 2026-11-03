@@ -27,6 +27,12 @@ Usage:
                                              share an adapter (prints the password)
   easyether --cli client <host> [port] (--password <8 chars> | --insecure) [--ip <addr>/<prefix>]
 
+Reverse (the client shares its adapter and the server uses it; the server still waits,
+e.g. it has the public address and the sharing computer is behind NAT):
+  easyether --cli server --reverse [port] [--insecure] [--ip <addr>/<prefix>]
+                                             wait for a client to share (prints the password)
+  easyether --cli client <host> [port] --share <adapter> (--password <8 chars> | --insecure)
+
   --insecure: plain TCP without encryption or password (must be used on both sides)
   easyether --install-drivers                Windows: install the SeLow and virtual adapter drivers
   easyether --uninstall-drivers              Windows: remove them again
@@ -221,39 +227,29 @@ fn cli(args: &[String]) -> i32 {
                 1
             }
         },
-        Some("server") if args.len() >= 2 => {
-            let port = args
-                .get(2)
-                .and_then(|p| p.parse().ok())
-                .unwrap_or(settings::DEFAULT_PORT);
-            let secure = !args.iter().any(|a| a == "--insecure");
-            let password = std::env::var("EASYETHER_PASSWORD")
-                .map(|p| secure::normalize_password(&p))
-                .unwrap_or_else(|_| secure::generate_password());
-            if secure {
-                println!("Password: {}", secure::display_password(&password));
-            }
-            let cfg = tunnel::ServerConfig {
-                adapter_id: args[1].clone(),
-                adapter_name: args[1].clone(),
-                port,
-                secure,
-                password,
-            };
-            let handle = tunnel::start_server(cfg, logger);
-            print_events(rx, &handle);
-            0
-        }
-        Some("client") if args.len() >= 2 => {
+        Some(role @ ("server" | "client")) if args.len() >= 2 => {
+            // The server waits, the client connects. Who shares: server <adapter> | --reverse
+            // (uses the client's adapter); client <host> [--share <adapter>].
             let mut port = settings::DEFAULT_PORT;
             let mut password = String::new();
             let mut secure = true;
             let mut static_ipv4 = None;
+            // The adapter this side shares; `None` = the virtual adapter.
+            let mut share = (role == "server" && args[1] != "--reverse").then(|| args[1].clone());
             let mut i = 2;
             while i < args.len() {
                 match args[i].as_str() {
                     "--insecure" => secure = false,
-                    "--password" => {
+                    "--reverse" if role == "server" => {}
+                    "--share" if role == "client" => {
+                        share = args.get(i + 1).cloned();
+                        if share.is_none() {
+                            eprintln!("--share expects an adapter (see --cli list)");
+                            return 2;
+                        }
+                        i += 1;
+                    }
+                    "--password" if role == "client" => {
                         password = args.get(i + 1).cloned().unwrap_or_default();
                         i += 1;
                     }
@@ -279,16 +275,51 @@ fn cli(args: &[String]) -> i32 {
                 }
                 i += 1;
             }
-            let mut settings = settings::Settings::load();
-            let cfg = tunnel::ClientConfig {
-                host: args[1].clone(),
-                port,
-                secure,
-                password,
-                static_ipv4,
-                mac: settings.client_mac(),
+            if share.is_some() && static_ipv4.is_some() {
+                eprintln!("--ip sets the virtual adapter's address; it does not apply when sharing an adapter");
+                return 2;
+            }
+            let device = match share {
+                Some(adapter) => tunnel::Device::Share {
+                    id: adapter.clone(),
+                    name: adapter,
+                },
+                None => tunnel::Device::Virtual {
+                    mac: settings::Settings::load().client_mac(),
+                    static_ipv4,
+                },
             };
-            let handle = tunnel::start_client(cfg, logger);
+            let handle = match (role == "client").then(|| args[1].clone()) {
+                Some(host) => {
+                    if secure && secure::normalize_password(&password).len() != secure::PASSWORD_LEN {
+                        eprintln!("--password <8 chars> (as shown by the server) or --insecure is required");
+                        return 2;
+                    }
+                    let cfg = tunnel::ClientConfig {
+                        host,
+                        port,
+                        secure,
+                        password,
+                        device,
+                    };
+                    tunnel::start_client(cfg, logger)
+                }
+                None => {
+                    let password = std::env::var("EASYETHER_PASSWORD")
+                        .map(|p| secure::normalize_password(&p))
+                        .unwrap_or_else(|_| secure::generate_password());
+                    if secure {
+                        println!("Password: {}", secure::display_password(&password));
+                    }
+                    let cfg = tunnel::ServerConfig {
+                        device,
+                        port,
+                        secure,
+                        password,
+                    };
+                    tunnel::start_server(cfg, logger)
+                }
+            };
             print_events(rx, &handle);
             0
         }

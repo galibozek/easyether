@@ -1,6 +1,7 @@
 //! egui front-end: header, Server/Client tabs, confirmation dialogs.
 
 mod client;
+mod device;
 mod server;
 mod tray;
 mod widgets;
@@ -177,14 +178,32 @@ impl App {
                             .color(widgets::pal(ui).muted),
                     );
                 });
-                widgets::muted(ui, "Peer-to-peer Ethernet (L2) sharing over the local network");
+                widgets::muted(ui, "Peer-to-peer Ethernet (L2) sharing over the network");
             });
-            // Theme switch, top right.
+            // Theme switch top right, and left of it who shares the adapter.
+            let active = self.is_active();
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if let Some(theme) = widgets::theme_switch(ui, &self.settings.theme) {
                     self.settings.theme = theme.to_string();
                     self.settings.save();
                     widgets::apply_theme(ui.ctx(), theme);
+                }
+                ui.add_space(12.0);
+                let pick = ui.scope(|ui| {
+                    widgets::segmented(ui, !active, &["Normal", "Reverse"], usize::from(self.settings.reverse))
+                });
+                pick.response.on_hover_text(if active {
+                    "Who shares the adapter. Stop first to change it."
+                } else {
+                    "Who shares the adapter. The server always waits and the client connects.\n\
+                     Normal: the server shares its adapter, the client uses it.\n\
+                     Reverse: the client shares its adapter, the server uses it. For a sharing \
+                     computer behind NAT that connects to a server with a public address.\n\
+                     Both sides must choose the same."
+                });
+                if let Some(i) = pick.inner {
+                    self.settings.reverse = i == 1;
+                    self.settings.save();
                 }
             });
         });
@@ -277,16 +296,8 @@ impl App {
     fn confirm_dialog(&mut self, ctx: &egui::Context) {
         let Some(what) = self.confirm else { return };
         let (title, text, yes) = match what {
-            Confirm::StopServer => (
-                "Stop sharing?",
-                "The connected client will lose access to the shared adapter.",
-                "Stop",
-            ),
-            Confirm::Disconnect => (
-                "Disconnect?",
-                "The virtual adapter will be disconnected from the remote network.",
-                "Disconnect",
-            ),
+            Confirm::StopServer => ("Stop sharing?", "The connected client will be disconnected.", "Stop"),
+            Confirm::Disconnect => ("Disconnect?", "The tunnel to the server will be closed.", "Disconnect"),
             Confirm::Quit => ("Exit EasyEther?", "Active sharing/connection will be closed.", "Exit"),
             Confirm::NewPassword => (
                 "Generate a new password?",
