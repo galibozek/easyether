@@ -248,6 +248,19 @@ pub fn start_dhcp(log: &Logger) -> io::Result<Option<Box<dyn Send>>> {
     }
 }
 
+/// Windows: asks the DHCP client for a lease on the virtual adapter now. Windows starts DHCP
+/// when the adapter comes up and, with no answer, falls back to 169.254.x.x and retries only
+/// every few minutes; a side that opens the adapter before the other end is there (the
+/// server in reverse) asks again once it is. Blocks until a lease arrives or the attempt
+/// fails, so call it from a thread of its own. Elsewhere nothing to do: restarting dhcpcd
+/// (dropping and starting `start_dhcp`) already begins with a fresh request.
+pub fn renew_dhcp(log: &Logger) {
+    #[cfg(windows)]
+    windows::renew_dhcp(log);
+    #[cfg(not(windows))]
+    let _ = log;
+}
+
 /// Stops the thread started by `watch_ipv4` when dropped.
 #[cfg(any(windows, target_os = "linux"))]
 pub(crate) struct AddressWatch(Arc<std::sync::atomic::AtomicBool>);

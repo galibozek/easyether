@@ -155,6 +155,12 @@ impl NetSettings {
     /// The dialog while open; call once per frame.
     pub fn dialog(&mut self, ctx: &egui::Context, settings: &mut Settings) {
         let Some(d) = &mut self.dialog else { return };
+        // The virtual adapter is on the server in reverse, on the client otherwise.
+        let when = if settings.reverse {
+            "Applied when a client connects and removed on Stop."
+        } else {
+            "Applied after connecting and removed on disconnect."
+        };
         let answer = widgets::modal(ctx, "network_settings", "Network settings", "Save", "Cancel", |ui| {
             widgets::muted(ui, format!("IPv4 configuration of '{}'", l2::client_adapter_name()));
             ui.add_space(6.0);
@@ -182,7 +188,7 @@ impl NetSettings {
                             ui.end_row();
                         });
                     ui.label(
-                        RichText::new("Applied after connecting and removed on disconnect.")
+                        RichText::new(when)
                             .size(12.0)
                             .color(widgets::pal(ui).muted),
                     );

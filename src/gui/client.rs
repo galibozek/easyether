@@ -29,12 +29,17 @@ impl ClientTab {
             picker: AdapterPicker::default(),
             net: NetSettings::default(),
         };
-        // Listed once here; problems are logged only when reverse is in use, the server tab
-        // reports them otherwise.
-        let (quiet, _rx) = crate::log::Logger::new(None);
-        let log = if settings.reverse { &tab.worker.logger } else { &quiet };
-        tab.picker.refresh(&settings.server_adapter_id, log);
+        // Listed only when this side shares; switching to reverse lists them then.
+        if settings.reverse {
+            tab.refresh_adapters(settings);
+        }
         tab
+    }
+
+    /// Lists the adapters to share again, problems logged: after switching to reverse (the
+    /// list was read at startup, quietly when reverse was off) and after a driver install.
+    pub fn refresh_adapters(&mut self, settings: &Settings) {
+        self.picker.refresh(&settings.server_adapter_id, &self.worker.logger);
     }
 
     pub fn is_running(&self) -> bool {

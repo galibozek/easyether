@@ -80,6 +80,10 @@ pub fn start_dhcp(log: &Logger) -> io::Result<Option<Box<dyn Send>>> {
     ipconfig::start_dhcp(log)
 }
 
+pub fn renew_dhcp(log: &Logger) {
+    ipconfig::renew_dhcp(log);
+}
+
 pub fn apply_static_ipv4(addr: Ipv4Addr, prefix: u8, log: &Logger) -> io::Result<Box<dyn Send>> {
     ipconfig::apply(addr, prefix, log)
 }

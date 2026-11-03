@@ -204,6 +204,9 @@ impl App {
                 if let Some(i) = pick.inner {
                     self.settings.reverse = i == 1;
                     self.settings.save();
+                    if self.settings.reverse {
+                        self.client.refresh_adapters(&self.settings);
+                    }
                 }
             });
         });
@@ -244,6 +247,8 @@ impl App {
                         let resp = if locked {
                             resp.on_hover_text(if col == 0 {
                                 "Disconnect the client first."
+                            } else if self.settings.reverse {
+                                "Stop listening first."
                             } else {
                                 "Stop sharing first."
                             })
@@ -296,9 +301,13 @@ impl App {
     fn confirm_dialog(&mut self, ctx: &egui::Context) {
         let Some(what) = self.confirm else { return };
         let (title, text, yes) = match what {
+            // In reverse the server only listens; the client is the one sharing.
+            Confirm::StopServer if self.settings.reverse => {
+                ("Stop listening?", "The connected client will be disconnected.", "Stop")
+            }
             Confirm::StopServer => ("Stop sharing?", "The connected client will be disconnected.", "Stop"),
             Confirm::Disconnect => ("Disconnect?", "The tunnel to the server will be closed.", "Disconnect"),
-            Confirm::Quit => ("Exit EasyEther?", "Active sharing/connection will be closed.", "Exit"),
+            Confirm::Quit => ("Exit EasyEther?", "The running tunnel will be closed.", "Exit"),
             Confirm::NewPassword => (
                 "Generate a new password?",
                 "A client is connected and will be disconnected; it needs the new password to connect again.",
@@ -354,7 +363,7 @@ impl eframe::App for App {
                 .server
                 .tray_status(&self.settings)
                 .or_else(|| self.client.tray_status(&self.settings))
-                .unwrap_or_else(|| "not sharing or connected".into());
+                .unwrap_or_else(|| "not running".into());
             let tip = format!("EasyEther – {state}");
             if tip != self.tray_tip {
                 tray.set_tooltip(&tip);
@@ -419,8 +428,17 @@ impl eframe::App for App {
                     ui.add_space(12.0);
                     widgets::card(ui, |ui| match self.tab {
                         Tab::Server => self.server.ui(ui, &mut self.settings, &mut self.confirm),
-                        Tab::Client => self.client.ui(ui, &mut self.settings, &mut self.confirm),
+                        Tab::Client => {
+                            #[cfg(windows)]
+                            self.server.drivers_ui(ui);
+                            self.client.ui(ui, &mut self.settings, &mut self.confirm)
+                        }
                     });
+                    // Only the sharing client lists adapters; in Normal mode the list is not
+                    // used and its problems would only duplicate the server tab's.
+                    if std::mem::take(&mut self.server.drivers_changed) && self.settings.reverse {
+                        self.client.refresh_adapters(&self.settings);
+                    }
                 });
             });
         self.confirm_dialog(&ctx);

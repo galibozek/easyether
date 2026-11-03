@@ -234,15 +234,30 @@ fn cli(args: &[String]) -> i32 {
             let mut password = String::new();
             let mut secure = true;
             let mut static_ipv4 = None;
-            // The adapter this side shares; `None` = the virtual adapter.
-            let mut share = (role == "server" && args[1] != "--reverse").then(|| args[1].clone());
+            // The adapter this side shares; `None` = the virtual adapter. `server --reverse`
+            // shares nothing; `--reverse` anywhere after an adapter would be silently ignored
+            // (and that adapter shared), so it is refused.
+            let reverse = role == "server" && args[1..].iter().any(|a| a == "--reverse");
+            if reverse && args[1] != "--reverse" {
+                eprintln!("server --reverse uses the client's adapter; do not name an adapter with it");
+                return 2;
+            }
+            let mut share = (role == "server" && !reverse).then(|| args[1].clone());
+            if share.as_deref().is_some_and(|a| a.starts_with("--")) {
+                eprintln!("server expects an adapter first (see --cli list), or --reverse");
+                return 2;
+            }
+            if role == "client" && args[1].starts_with("--") {
+                eprintln!("client expects the server's address first");
+                return 2;
+            }
             let mut i = 2;
             while i < args.len() {
                 match args[i].as_str() {
                     "--insecure" => secure = false,
                     "--reverse" if role == "server" => {}
                     "--share" if role == "client" => {
-                        share = args.get(i + 1).cloned();
+                        share = args.get(i + 1).filter(|a| !a.starts_with("--")).cloned();
                         if share.is_none() {
                             eprintln!("--share expects an adapter (see --cli list)");
                             return 2;

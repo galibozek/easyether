@@ -226,7 +226,7 @@ pub fn server_handshake(tcp: TcpStream, id: &ServerIdentity, password: Option<&s
             if proto::read_hello(&mut tcp, proto::MAGIC_CLIENT_PLAIN).is_ok() {
                 let _ = proto::write_error(
                     &mut tcp,
-                    "This computer shares in Secure mode. Enable \"Secure\" and enter the password.",
+                    "The server uses Secure mode. Enable \"Secure\" and enter the password.",
                 );
             }
             return Err(other("client tried to connect without Secure mode"));
@@ -252,14 +252,14 @@ pub fn server_handshake(tcp: TcpStream, id: &ServerIdentity, password: Option<&s
         // with a protocol error (rather than a bare EOF), which it reports as a Secure mismatch.
         (None, true) => {
             let mut tcp = tcp;
-            let _ = proto::write_error(&mut tcp, "This computer shares without Secure mode.");
+            let _ = proto::write_error(&mut tcp, "The server does not use Secure mode.");
             // Drain the unread ClientHello before closing: closing with unread data makes the
             // kernel send RST, which could discard our reply before the client reads it.
             let _ = tcp.shutdown(std::net::Shutdown::Write);
             let _ = tcp.set_read_timeout(Some(std::time::Duration::from_millis(500)));
             let mut sink = [0u8; 4096];
             while matches!(tcp.read(&mut sink), Ok(n) if n > 0) {}
-            return Err(other("client uses Secure mode, but sharing is not secure"));
+            return Err(other("client uses Secure mode, but this server does not"));
         }
     };
 

@@ -21,6 +21,8 @@ pub struct ServerTab {
     installer: Option<std::thread::JoinHandle<()>>,
     #[cfg(windows)]
     drivers: Option<crate::l2::windows::install::DriverStatus>,
+    /// Set when a driver installation finished, so the client tab lists its adapters again.
+    pub drivers_changed: bool,
 }
 
 impl ServerTab {
@@ -39,6 +41,7 @@ impl ServerTab {
             installer: None,
             #[cfg(windows)]
             drivers: None,
+            drivers_changed: false,
         };
         tab.refresh(settings);
         tab
@@ -237,12 +240,15 @@ impl ServerTab {
         self.net.dialog(ui.ctx(), settings);
     }
 
+    /// "Drivers missing" with an Install button, while any is missing. Shown on both tabs:
+    /// the side that shares needs SeLow, the side that uses the shared adapter VPN127.
     #[cfg(windows)]
-    fn drivers_ui(&mut self, ui: &mut egui::Ui) {
+    pub fn drivers_ui(&mut self, ui: &mut egui::Ui) {
         if self.installer.as_ref().is_some_and(|t| t.is_finished()) {
             let _ = self.installer.take().unwrap().join();
             let settings = Settings::load();
             self.refresh(&settings);
+            self.drivers_changed = true;
         }
         let installing = self.installer.is_some();
         let Some(st) = &self.drivers else { return };

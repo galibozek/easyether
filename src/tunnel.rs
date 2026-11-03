@@ -187,9 +187,10 @@ impl Device {
         }
     }
 
-    /// Opens the adapter. The virtual one also gets its route priority and IPv4, again after a
-    /// reopen, and loses them when the returned value is dropped.
-    fn open(&self, log: &Logger) -> io::Result<OpenDevice> {
+    /// Opens the adapter. The virtual one gets its route priority at once, and its IPv4 too
+    /// when `configure_ip` is set (otherwise later, see `VirtualIp::apply`); both again after
+    /// a reopen, and the IPv4 is removed when the returned value is dropped.
+    fn open(&self, log: &Logger, configure_ip: bool) -> io::Result<OpenDevice> {
         match self {
             Device::Share { id, name } => Ok(OpenDevice {
                 virt: None,
@@ -198,31 +199,30 @@ impl Device {
             Device::Virtual { mac, static_ipv4 } => {
                 let port = Arc::new(l2::open_client(*mac, log)?);
                 l2::prefer_local_networks(log);
-                let virt = VirtualSetup {
-                    ip_guard: Arc::new(Mutex::new(configure_client_ip(*static_ipv4, log))),
-                    closing: Arc::new(AtomicBool::new(false)),
+                let ip = VirtualIp {
+                    guard: Arc::default(),
+                    configured: Arc::default(),
+                    closing: Arc::default(),
+                    static_ipv4: *static_ipv4,
+                    log: log.clone(),
                 };
+                if configure_ip {
+                    ip.apply(false);
+                }
                 // A restarted adapter (driver restart, adapter disabled and enabled) comes back
-                // without its route priority and addresses: set them up again. The old guard
-                // goes first, so a static address is removed and added rather than left twice.
-                let (ip_guard, closing, log, static_ipv4) =
-                    (virt.ip_guard.clone(), virt.closing.clone(), log.clone(), *static_ipv4);
+                // without its route priority and addresses: set them up again.
+                let hook = ip.clone();
                 port.set_on_reopen(move || {
-                    if closing.load(Ordering::SeqCst) {
-                        return;
+                    if hook.configured.load(Ordering::SeqCst) {
+                        hook.apply(false);
+                    } else if !hook.closing.load(Ordering::SeqCst) {
+                        l2::prefer_local_networks(&hook.log);
                     }
-                    l2::prefer_local_networks(&log);
-                    let mut guard = ip_guard.lock().unwrap();
-                    // Checked again under the lock that the teardown also takes, so either this
-                    // hook configures before the teardown removes it, or it sees the flag and
-                    // stops.
-                    if closing.load(Ordering::SeqCst) {
-                        return;
-                    }
-                    *guard = None;
-                    *guard = configure_client_ip(static_ipv4, &log);
                 });
-                Ok(OpenDevice { virt: Some(virt), port })
+                Ok(OpenDevice {
+                    virt: Some(VirtualSetup(ip)),
+                    port,
+                })
             }
         }
     }
@@ -231,23 +231,74 @@ impl Device {
 /// An opened `Device`. Fields drop in declaration order: the virtual adapter's IP
 /// configuration is removed while the adapter still exists.
 struct OpenDevice {
-    #[allow(dead_code)] // held for its Drop
     virt: Option<VirtualSetup>,
     port: Arc<ResilientPort>,
 }
 
-/// The virtual adapter's IPv4 configuration, undone on drop.
-struct VirtualSetup {
-    ip_guard: Arc<Mutex<Option<Box<dyn Send>>>>,
-    /// Set when closing: a reopen hook still running then must not configure the adapter
-    /// again (it runs on its own thread and can outlive the worker).
-    closing: Arc<AtomicBool>,
+impl OpenDevice {
+    /// The virtual adapter's IPv4 configuration, to apply it later (`None` when sharing).
+    fn ip(&self) -> Option<VirtualIp> {
+        self.virt.as_ref().map(|v| v.0.clone())
+    }
 }
+
+/// The virtual adapter's route priority and IPv4 (static or DHCP). Shared by the worker, the
+/// reopen hook and, on the server, the sessions that (re)apply it when a client arrives.
+#[derive(Clone)]
+struct VirtualIp {
+    guard: Arc<Mutex<Option<Box<dyn Send>>>>,
+    /// Applied at least once, so a reopened adapter is set up again.
+    configured: Arc<AtomicBool>,
+    /// Set when closing: an apply still running then (on its own thread, it may outlive the
+    /// worker) must not configure the adapter again.
+    closing: Arc<AtomicBool>,
+    static_ipv4: Option<(Ipv4Addr, u8)>,
+    log: Logger,
+}
+
+impl VirtualIp {
+    /// Sets the route priority and the IPv4 up (again). The old guard goes first, so a static
+    /// address is removed and added rather than left twice, and dhcpcd starts over. `renew`:
+    /// with DHCP, also ask for a lease now (Windows), for when the other end only just arrived.
+    fn apply(&self, renew: bool) {
+        if self.closing.load(Ordering::SeqCst) {
+            return;
+        }
+        // Before the work, so a reopen that lands meanwhile re-applies (on the new adapter
+        // instance) after this, instead of being skipped.
+        self.configured.store(true, Ordering::SeqCst);
+        l2::prefer_local_networks(&self.log);
+        {
+            let mut guard = self.guard.lock().unwrap();
+            // Checked again under the lock that the teardown also takes, so either this
+            // configures before the teardown removes it, or it sees the flag and stops.
+            if self.closing.load(Ordering::SeqCst) {
+                return;
+            }
+            *guard = None;
+            *guard = configure_client_ip(self.static_ipv4, &self.log);
+        }
+        if renew {
+            self.renew();
+        }
+    }
+
+    /// With DHCP, asks for a lease now (Windows; dhcpcd keeps asking by itself). Not under
+    /// the guard's lock, as it may wait a while, so a Stop meanwhile is not held up.
+    fn renew(&self) {
+        if self.static_ipv4.is_none() && !self.closing.load(Ordering::SeqCst) {
+            l2::renew_dhcp(&self.log);
+        }
+    }
+}
+
+/// Removes the virtual adapter's IPv4 configuration on drop.
+struct VirtualSetup(VirtualIp);
 
 impl Drop for VirtualSetup {
     fn drop(&mut self) {
-        self.closing.store(true, Ordering::SeqCst);
-        self.ip_guard.lock().unwrap().take();
+        self.0.closing.store(true, Ordering::SeqCst);
+        self.0.guard.lock().unwrap().take();
     }
 }
 
@@ -719,6 +770,11 @@ pub fn start_server(cfg: ServerConfig, log: Logger) -> TunnelHandle {
     let thread = {
         let (stop, password, active, last) = (stop.clone(), password.clone(), active.clone(), last_client.clone());
         std::thread::spawn(move || {
+            let stopped = if cfg.device.shares() {
+                "Ethernet sharing stopped."
+            } else {
+                "Stopped listening."
+            };
             if let Err(e) = server_main(&cfg, stop, password, active, last, &log) {
                 // Full message in the log; the status line stays short.
                 log.error(e.to_string());
@@ -726,7 +782,7 @@ pub fn start_server(cfg: ServerConfig, log: Logger) -> TunnelHandle {
             } else {
                 log.status("Stopped");
             }
-            log.info("Ethernet sharing stopped.");
+            log.info(stopped);
         })
     };
     TunnelHandle {
@@ -843,6 +899,12 @@ struct Server {
     last_client: Arc<Mutex<Option<(SocketAddr, Instant)>>>,
     /// Held for the duration of a session (only one client at a time).
     session_slot: Mutex<()>,
+    /// Using the virtual adapter: its IPv4, applied when a client arrives rather than at
+    /// Listen, when there is nobody to answer DHCP yet.
+    virt_ip: Option<VirtualIp>,
+    /// The client the IPv4 was last applied for; a different one (maybe from another network)
+    /// gets it applied again, a reconnecting one keeps it.
+    ip_client: Mutex<Option<proto::ClientId>>,
 }
 
 fn server_main(
@@ -868,7 +930,8 @@ fn server_main(
         ));
     }
     log.status("Starting...");
-    let device = cfg.device.open(log)?;
+    // The virtual adapter's IPv4 waits for the first client (see `Server::virt_ip`).
+    let device = cfg.device.open(log, false)?;
     let identity = ServerIdentity::generate()?;
     l2::prepare_listen(cfg.port, log);
     let listener = listen_dual_stack(cfg.port)
@@ -900,6 +963,8 @@ fn server_main(
         active,
         last_client,
         session_slot: Mutex::new(()),
+        virt_ip: device.ip(),
+        ip_client: Mutex::default(),
     });
     let result = serve(listener, server);
     // The virtual adapter's IP configuration goes here, while the adapter still exists.
@@ -978,11 +1043,6 @@ impl Server {
         } else {
             self.log.status("Waiting for a client to share its adapter");
         }
-    }
-
-    /// Who connects here, for messages.
-    fn peer_noun(&self) -> &'static str {
-        "client"
     }
 
     fn incoming(self: Arc<Self>, tcp: TcpStream, peer: SocketAddr) {
@@ -1073,10 +1133,8 @@ impl Server {
             match active.as_ref() {
                 Some(cur) if cur.last_rx.lock().unwrap().elapsed() < STALE_SESSION && cur.client_id != client_id => {
                     drop(active);
-                    self.log.info(format!(
-                        "Rejected {peer}: another {} is connected and active.",
-                        self.peer_noun()
-                    ));
+                    self.log
+                        .info(format!("Rejected {peer}: another client is connected and active."));
                     auth.reject(if self.shares {
                         "The sharing computer already has a client connected."
                     } else {
@@ -1089,15 +1147,11 @@ impl Server {
         };
         if let Some(old) = &old {
             if old.client_id == client_id {
-                self.log.info(format!(
-                    "{peer}: the {} reconnected; replacing its previous connection.",
-                    self.peer_noun()
-                ));
+                self.log
+                    .info(format!("{peer}: the client reconnected; replacing its previous connection."));
             } else {
-                self.log.info(format!(
-                    "{peer} replaces the previous (unresponsive) {} session.",
-                    self.peer_noun()
-                ));
+                self.log
+                    .info(format!("{peer} replaces the previous (unresponsive) client session."));
             }
             // Stop flag first: within ~50 ms the old session sends Close (so that client does
             // not reconnect and fight over the slot); cut the socket only if it does not end.
@@ -1114,13 +1168,17 @@ impl Server {
                 old.kill();
             }
             if Instant::now() >= deadline || self.stop.load(Ordering::SeqCst) {
-                auth.reject("The sharing computer is busy; please retry in a few seconds.");
+                auth.reject("The server is busy; please retry in a few seconds.");
                 return;
             }
             std::thread::sleep(Duration::from_millis(50));
         };
         if self.stop.load(Ordering::SeqCst) {
-            auth.reject("Sharing is stopping.");
+            auth.reject(if self.shares {
+                "Sharing is stopping."
+            } else {
+                "The server is stopping."
+            });
             return;
         }
         let stream = match auth.accept() {
@@ -1140,7 +1198,6 @@ impl Server {
             peer,
             since: Instant::now(),
         });
-        let noun = self.peer_noun();
         if self.shares {
             self.log
                 .info(format!("Client {peer} authenticated; Ethernet tunnel established."));
@@ -1151,13 +1208,26 @@ impl Server {
                 l2::client_adapter_name()
             ));
             self.log.status(format!("Client connected ({peer})"));
+            // Now there is a network behind the virtual adapter: set its IPv4 up (DHCP gets
+            // answers) for the first client and for a different one (maybe another network).
+            // A reconnecting client keeps the configuration, but DHCP is asked again: after a
+            // long outage the lease has expired and Windows asks by itself only every few
+            // minutes. On its own thread, as DHCP may wait for a lease while frames already
+            // flow.
+            if let Some(ip) = &self.virt_ip {
+                let mut last = self.ip_client.lock().unwrap();
+                let new_client = *last != Some(client_id);
+                *last = Some(client_id);
+                let ip = ip.clone();
+                std::thread::spawn(move || if new_client { ip.apply(true) } else { ip.renew() });
+            }
         }
         match run_session(stream, self.port.clone(), &my_stop, Some(&last_rx), &self.log) {
             End::Stopped => self.log.info(format!("Session with {peer} closed.")),
-            End::PeerClosed => self.log.info(format!("The {noun} {peer} disconnected.")),
+            End::PeerClosed => self.log.info(format!("The client {peer} disconnected.")),
             End::Peer(e) => self
                 .log
-                .warn(format!("Connection to {peer} lost: {e}. The {noun} will reconnect.")),
+                .warn(format!("Connection to {peer} lost: {e}. The client will reconnect.")),
             End::Adapter(e) => self.log.error(format!("Adapter error: {e}")),
         }
         self.clear_active(&my_stop);
@@ -1391,7 +1461,7 @@ fn client_main(
     // bothered. The virtual adapter only once the password was accepted, so a typo does not
     // make an adapter appear and disappear.
     let mut device = if cfg.device.shares() {
-        Some(cfg.device.open(log)?)
+        Some(cfg.device.open(log, true)?)
     } else {
         None
     };
@@ -1404,7 +1474,7 @@ fn client_main(
     // The adapter stays open across reconnects, so the OS keeps its link, IP and routes.
     let device = match device.take() {
         Some(d) => d,
-        None => cfg.device.open(log)?,
+        None => cfg.device.open(log, true)?,
     };
     let port: Arc<dyn L2Port> = device.port.clone();
     let adapter = cfg.device.adapter_name().to_string();
@@ -1728,6 +1798,8 @@ mod tests {
                 active: active.clone(),
                 last_client: Arc::default(),
                 session_slot: Mutex::new(()),
+                virt_ip: None,
+                ip_client: Mutex::default(),
             });
             let thread = std::thread::spawn(move || serve(listener, server));
             TestServer {

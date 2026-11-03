@@ -186,6 +186,56 @@ pub fn start_dhcp(log: &Logger) -> io::Result<Option<Box<dyn Send>>> {
     Ok(Some(Box::new(crate::l2::watch_ipv4(move || current_ipv4(luid), log))))
 }
 
+/// Asks Windows' DHCP client for a lease on the Neo adapter now (a fresh request also after it
+/// gave up and fell back to 169.254.x.x). Blocks until a lease arrives or the attempt fails.
+pub fn renew_dhcp(log: &Logger) {
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        ConvertInterfaceLuidToIndex, GetInterfaceInfo, IP_ADAPTER_INDEX_MAP, IP_INTERFACE_INFO, IpRenewAddress,
+    };
+    let Ok(luid) = neo_luid() else { return };
+    let mut index = 0u32;
+    // SAFETY: valid pointers to a NET_LUID and a u32.
+    if unsafe { ConvertInterfaceLuidToIndex(&luid, &mut index) } != 0 {
+        return;
+    }
+    // IpRenewAddress takes the adapter's entry from GetInterfaceInfo (index and name).
+    let mut len = 0u32;
+    // SAFETY: a null table with a zero length only asks for the size needed.
+    unsafe { GetInterfaceInfo(std::ptr::null_mut(), &mut len) };
+    if len == 0 {
+        return;
+    }
+    // u64 elements: aligned for the table's u32 fields.
+    let mut buf = vec![0u64; (len as usize).div_ceil(8)];
+    let info = buf.as_mut_ptr().cast::<IP_INTERFACE_INFO>();
+    // SAFETY: `buf` holds at least `len` bytes, suitably aligned.
+    if unsafe { GetInterfaceInfo(info, &mut len) } != 0 {
+        return;
+    }
+    // SAFETY: the table was filled in; its entries follow each other from `Adapter`.
+    let (count, first) = unsafe {
+        (
+            (*info).NumAdapters.max(0) as usize,
+            std::ptr::addr_of!((*info).Adapter).cast::<IP_ADAPTER_INDEX_MAP>(),
+        )
+    };
+    for i in 0..count {
+        // SAFETY: i < NumAdapters, within the table written above.
+        let entry = unsafe { &*first.add(i) };
+        if entry.Index == index {
+            // SAFETY: a valid entry from GetInterfaceInfo.
+            let r = unsafe { IpRenewAddress(entry) };
+            if r != 0 {
+                log.info(format!(
+                    "No DHCP lease on '{CLIENT_ADAPTER_NAME}' yet ({}); asked again when the client reconnects.",
+                    io::Error::from_raw_os_error(r as i32)
+                ));
+            }
+            return;
+        }
+    }
+}
+
 pub fn apply(addr: Ipv4Addr, prefix: u8, log: &Logger) -> io::Result<Box<dyn Send>> {
     let luid = neo_luid()?;
 
