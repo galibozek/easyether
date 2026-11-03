@@ -17,6 +17,14 @@ inputs:
 runs:
   using: composite
   steps:
+    # Cache keys may not contain commas, and a target list has them ("a, b"): commas and
+    # spaces become "_".
+    - name: Cache key
+      id: cache-key
+      shell: bash
+      env:
+        TARGETS: ${{ inputs.target || 'host' }}
+      run: echo "key=easyether-$(printf '%s' "$TARGETS" | tr ', ' '__' | tr -s '_')" >> "$GITHUB_OUTPUT"
     # Includes a cargo registry + target/ cache. One shared key per target set, so the release
     # build (tags) reuses the cache that ci.yml keeps warm on main.
     - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
@@ -24,7 +32,7 @@ runs:
         toolchain: stable
         target: ${{ inputs.target }}
         components: ${{ inputs.components }}
-        cache-shared-key: easyether-${{ inputs.target || 'host' }}
+        cache-shared-key: ${{ steps.cache-key.outputs.key }}
     - name: System libraries
       shell: bash
       run: |
