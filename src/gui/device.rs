@@ -187,11 +187,7 @@ impl NetSettings {
                             );
                             ui.end_row();
                         });
-                    ui.label(
-                        RichText::new(when)
-                            .size(12.0)
-                            .color(widgets::pal(ui).muted),
-                    );
+                    ui.label(RichText::new(when).size(12.0).color(widgets::pal(ui).muted));
                 });
             });
             if !d.error.is_empty() {

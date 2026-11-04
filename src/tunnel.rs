@@ -1161,8 +1161,9 @@ impl Server {
         };
         if let Some(old) = &old {
             if old.client_id == client_id {
-                self.log
-                    .info(format!("{peer}: the client reconnected; replacing its previous connection."));
+                self.log.info(format!(
+                    "{peer}: the client reconnected; replacing its previous connection."
+                ));
             } else {
                 self.log
                     .info(format!("{peer} replaces the previous (unresponsive) client session."));

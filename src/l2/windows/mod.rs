@@ -84,7 +84,12 @@ pub fn renew_dhcp(log: &Logger) {
     ipconfig::renew_dhcp(log);
 }
 
-pub fn apply_static_ipv4(addr: Ipv4Addr, prefix: u8, link_local_first: bool, log: &Logger) -> io::Result<Box<dyn Send>> {
+pub fn apply_static_ipv4(
+    addr: Ipv4Addr,
+    prefix: u8,
+    link_local_first: bool,
+    log: &Logger,
+) -> io::Result<Box<dyn Send>> {
     ipconfig::apply(addr, prefix, link_local_first, log)
 }
 
