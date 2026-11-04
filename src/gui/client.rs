@@ -168,7 +168,7 @@ impl ClientTab {
             });
             ui.vertical(|ui| {
                 widgets::caption(ui, "Port");
-                ui.add_enabled(!running, egui::TextEdit::singleline(&mut self.port).desired_width(70.0));
+                widgets::port_field(ui, !running, &mut self.port);
             });
             ui.vertical(|ui| {
                 widgets::caption(ui, "Security");
@@ -190,6 +190,9 @@ impl ClientTab {
                     })
                     .desired_width(110.0);
                 let resp = ui.add_enabled(!running && settings.client_secure, edit);
+                if resp.changed() {
+                    limit_password(&mut self.password);
+                }
                 if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && !running {
                     self.connect(settings);
                 }
@@ -264,10 +267,36 @@ fn split_host_port(text: &str) -> Option<(String, u16)> {
     Some((host.to_string(), port.parse().ok()?))
 }
 
+/// Keeps only what a password can hold: letters and digits (8 of them, as the server shows
+/// it), with spaces and dashes allowed between them, as in "abcd 1234".
+fn limit_password(text: &mut String) {
+    let mut chars = 0;
+    text.retain(|c| {
+        if chars == crate::secure::PASSWORD_LEN {
+            false
+        } else if c.is_ascii_alphanumeric() {
+            chars += 1;
+            true
+        } else {
+            c == ' ' || c == '-'
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::worker::retry;
     use super::*;
+
+    #[test]
+    fn password_is_limited_to_eight_characters() {
+        let mut p = String::from("abcd 1234xyz");
+        limit_password(&mut p);
+        assert_eq!(p, "abcd 1234");
+        let mut p = String::from("ab!c-d_12ąę34 ");
+        limit_password(&mut p);
+        assert_eq!(p, "abc-d1234");
+    }
 
     #[test]
     fn pasted_port_is_split_off() {

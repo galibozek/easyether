@@ -306,6 +306,21 @@ pub fn small_button(ui: &mut egui::Ui, enabled: bool, text: &str) -> egui::Respo
     ui.add_enabled(enabled, egui::Button::new(text.to_string()).small())
 }
 
+/// Port entry: digits only, at most 5 of them, and never above 65535.
+pub fn port_field(ui: &mut egui::Ui, enabled: bool, port: &mut String) -> egui::Response {
+    let response = ui.add_enabled(
+        enabled,
+        egui::TextEdit::singleline(port).char_limit(5).desired_width(70.0),
+    );
+    if response.changed() {
+        port.retain(|c| c.is_ascii_digit());
+        if port.parse::<u32>().is_ok_and(|p| p > u16::MAX as u32) {
+            *port = u16::MAX.to_string();
+        }
+    }
+    response
+}
+
 /// Modal dialog with a dimmed backdrop: title, body, and right-aligned `[cancel] [primary]`.
 /// Returns `Some(true)` for the primary button, `Some(false)` for cancel / Esc / click outside.
 pub fn modal(

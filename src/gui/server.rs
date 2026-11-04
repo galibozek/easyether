@@ -201,7 +201,7 @@ impl ServerTab {
                 ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
                     ui.allocate_ui_with_layout(egui::vec2(70.0, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
                         widgets::caption(ui, "Port");
-                        ui.add_enabled(!running, egui::TextEdit::singleline(&mut self.port).desired_width(70.0));
+                        widgets::port_field(ui, !running, &mut self.port);
                     });
                 });
             });
