@@ -44,9 +44,10 @@ const NOTSENT_LOWAT: i32 = 128 << 10;
 const RECONNECT_DELAYS: [u64; 5] = [0, 1, 2, 5, 10];
 /// Hard limit for the whole handshake (TLS + password), against slow or stalled clients.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-/// Per-attempt TCP connect limit. Short on purpose: while the network is down each attempt
-/// just waits this long, so a shorter value means a faster return once it is back.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Per-attempt TCP connect limit. Long enough for the SYN to be sent three times (Windows
+/// resends after 3 and 9 s, Linux after 1, 3 and 7 s), so one lost SYN or reply on a weak link
+/// (LTE, VPN over it) does not fail the attempt. Stop does not wait for it (`connect_one`).
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Unauthenticated connections handled at once; more are closed immediately.
 const MAX_HANDSHAKES: usize = 8;
 /// Wrong passwords from one IP before it is blocked for `BAN_TIME`.
@@ -84,8 +85,7 @@ pub struct ClientLink {
 }
 
 impl TunnelHandle {
-    /// Requests a stop; the worker finishes within a fraction of a second (or after a pending
-    /// connect attempt times out).
+    /// Requests a stop; the worker finishes within a fraction of a second.
     pub fn stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(s) = self.sock.lock().unwrap().as_ref() {
@@ -1379,12 +1379,42 @@ fn connect(host: &str, port: u16, stop: &AtomicBool) -> io::Result<TcpStream> {
         if stop.load(Ordering::SeqCst) {
             return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
         }
-        match TcpStream::connect_timeout(&a, CONNECT_TIMEOUT) {
+        match connect_one(a, stop) {
             Ok(s) => return Ok(s),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => return Err(e),
             Err(e) => last = io::Error::new(e.kind(), format!("cannot connect to {a}: {e}")),
         }
     }
     Err(last)
+}
+
+/// One connect attempt (up to `CONNECT_TIMEOUT`) that returns at once when stop is requested.
+/// The attempt runs on its own thread; a cancelled or timed-out one ends by itself (the OS
+/// gives up after its SYN retries) and its socket is closed.
+/// A plain blocking connect, not `connect_timeout`: on Windows a clone of a stream made by
+/// `connect_timeout` sometimes cannot be shut down (WSAENOTCONN, rust-lang/rust#163997),
+/// and the session relies on clones to cut a stalled connection on Stop.
+fn connect_one(a: SocketAddr, stop: &AtomicBool) -> io::Result<TcpStream> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(TcpStream::connect(a));
+    });
+    let deadline = Instant::now() + CONNECT_TIMEOUT;
+    loop {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(r) => return r,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) if stop.load(Ordering::SeqCst) => {
+                return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) if Instant::now() >= deadline => {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "connection timed out"));
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(io::Error::other("connect thread ended"));
+            }
+        }
+    }
 }
 
 /// A 169.254.x.x address (also IPv4-mapped IPv6).
