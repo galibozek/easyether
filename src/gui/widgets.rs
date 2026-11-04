@@ -257,6 +257,13 @@ pub fn secondary_button(text: &str) -> egui::Button<'static> {
 /// so toggling Secure does not make the panel jump.
 pub const SETTINGS_ROW_HEIGHT: f32 = 26.0;
 
+/// Gives the top row (captioned fields and the 32 px main button) one height on both tabs and
+/// in both modes, so switching tabs or Normal/Reverse moves nothing. Call first in the row.
+pub fn top_row_height(ui: &mut egui::Ui) {
+    let caption = ui.fonts_mut(|f| f.row_height(&egui::FontId::proportional(11.5)));
+    ui.set_min_height(caption + ui.spacing().item_spacing.y + 32.0);
+}
+
 /// "Copied to clipboard" shown under the control that copied, for two seconds.
 #[derive(Default)]
 pub struct Copied {

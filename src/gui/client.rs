@@ -143,6 +143,7 @@ impl ClientTab {
         ui.add_space(4.0);
 
         ui.horizontal(|ui| {
+            widgets::top_row_height(ui);
             // Port, Secure, password, Connect/Disconnect (104) and spacing.
             let host_width = (ui.available_width() - 468.0).max(180.0);
             ui.vertical(|ui| {

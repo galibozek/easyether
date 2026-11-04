@@ -152,6 +152,7 @@ impl ServerTab {
         self.drivers_ui(ui);
 
         ui.horizontal(|ui| {
+            widgets::top_row_height(ui);
             if virt {
                 // The virtual adapter that will carry the client's network.
                 ui.vertical(|ui| {
@@ -192,11 +193,16 @@ impl ServerTab {
                 {
                     self.start(settings);
                 }
-                // The port is a setting, the button an action: not glued together.
                 ui.add_space(PORT_GAP);
-                ui.vertical(|ui| {
-                    widgets::caption(ui, "Port");
-                    ui.add_enabled(!running, egui::TextEdit::singleline(&mut self.port).desired_width(70.0));
+                // A plain `vertical` spans all the free width and puts the field at its left end,
+                // next to Refresh. This column is placed the same way (so the row does not move
+                // between Normal and Reverse) but keeps the field at its right end, by the button;
+                // the inner block keeps the caption left-aligned over the field.
+                ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
+                    ui.allocate_ui_with_layout(egui::vec2(70.0, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                        widgets::caption(ui, "Port");
+                        ui.add_enabled(!running, egui::TextEdit::singleline(&mut self.port).desired_width(70.0));
+                    });
                 });
             });
         });
