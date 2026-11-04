@@ -43,15 +43,17 @@ pub trait L2Port: Send + Sync {
         None
     }
 
-    /// Discards frames queued while nobody was listening.
-    fn drain(&self) {
-        let mut tmp = Vec::new();
+    /// Discards frames queued while nobody was listening; returns how many.
+    fn drain(&self) -> usize {
+        let (mut tmp, mut dropped) = (Vec::new(), 0);
         for _ in 0..64 {
             tmp.clear();
             if self.recv(&mut tmp, Duration::ZERO).is_err() || tmp.is_empty() {
                 break;
             }
+            dropped += tmp.len();
         }
+        dropped
     }
 }
 

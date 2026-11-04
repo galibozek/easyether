@@ -463,12 +463,13 @@ fn run_session(
 
     // Device -> peer, plus keepalives and pings.
     let tx = {
-        let (stream, port, done, stop, counters) = (
+        let (stream, port, done, stop, counters, log) = (
             stream.clone(),
             port.clone(),
             done.clone(),
             stop.clone(),
             counters.clone(),
+            log.clone(),
         );
         std::thread::spawn(move || -> End {
             let mut frames = Vec::new();
@@ -533,7 +534,13 @@ fn run_session(
                         // The link was stuck: what piled up in the adapter meanwhile is stale
                         // (higher layers retransmit), so do not deliver it late.
                         counters.stall_drops.fetch_add(1, Ordering::Relaxed);
-                        port.drain();
+                        let dropped = port.drain();
+                        // Always logged (rare: only after a write blocked for seconds), so
+                        // lost frames show without --link-log.
+                        log.warn(format!(
+                            "The link stalled for {:.1} s; dropped {dropped} frame(s) queued meanwhile.",
+                            took.as_secs_f64()
+                        ));
                     }
                     r
                 } else if last_send.elapsed() >= KEEPALIVE {
