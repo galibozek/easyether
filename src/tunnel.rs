@@ -741,25 +741,29 @@ fn run_session(
     }
 }
 
-/// Runs `f`, shutting the socket down if it takes longer than `limit`.
-fn with_deadline<T>(tcp: &TcpStream, limit: Duration, f: impl FnOnce() -> T) -> T {
-    let done = Arc::new(AtomicBool::new(false));
-    if let Ok(killer) = tcp.try_clone() {
-        let done = done.clone();
-        std::thread::spawn(move || {
+/// Runs `f`, shutting the socket down if it takes longer than `limit` or `stop` is set.
+fn with_deadline<T>(tcp: &TcpStream, limit: Duration, stop: Option<&AtomicBool>, f: impl FnOnce() -> T) -> T {
+    let Ok(killer) = tcp.try_clone() else {
+        return f();
+    };
+    let done = AtomicBool::new(false);
+    std::thread::scope(|s| {
+        let watcher = s.spawn(|| {
             let start = Instant::now();
             while !done.load(Ordering::SeqCst) {
-                if start.elapsed() >= limit {
+                if start.elapsed() >= limit || stop.is_some_and(|s| s.load(Ordering::SeqCst)) {
                     let _ = killer.shutdown(std::net::Shutdown::Both);
                     return;
                 }
-                std::thread::sleep(Duration::from_millis(100));
+                std::thread::park_timeout(Duration::from_millis(100));
             }
         });
-    }
-    let r = f();
-    done.store(true, Ordering::SeqCst);
-    r
+        let r = f();
+        done.store(true, Ordering::SeqCst);
+        // Wake the watcher so the scope ends now, not at its next 100 ms tick.
+        watcher.thread().unpark();
+        r
+    })
 }
 
 // ----------------------------------------------------------------------------- server
@@ -1095,7 +1099,7 @@ impl Server {
             let killer = tcp.try_clone()?;
             // Registered so Stop can cut a handshake that is still in progress.
             self.pending.lock().unwrap().push(tcp.try_clone()?);
-            with_deadline(&killer, HANDSHAKE_TIMEOUT, || {
+            with_deadline(&killer, HANDSHAKE_TIMEOUT, None, || {
                 secure::server_handshake(tcp, &self.identity, pw.as_deref())
             })
         })();
@@ -1381,7 +1385,8 @@ fn connect(host: &str, port: u16, stop: &AtomicBool) -> io::Result<TcpStream> {
         }
         match connect_one(a, stop) {
             Ok(s) => return Ok(s),
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => return Err(e),
+            // A cancel, not an EINTR from the OS: only then the other addresses are skipped.
+            Err(e) if stop.load(Ordering::SeqCst) => return Err(e),
             Err(e) => last = io::Error::new(e.kind(), format!("cannot connect to {a}: {e}")),
         }
     }
@@ -1389,15 +1394,26 @@ fn connect(host: &str, port: u16, stop: &AtomicBool) -> io::Result<TcpStream> {
 }
 
 /// One connect attempt (up to `CONNECT_TIMEOUT`) that returns at once when stop is requested.
-/// The attempt runs on its own thread; a cancelled or timed-out one ends by itself (the OS
-/// gives up after its SYN retries) and its socket is closed.
+/// The attempt runs on its own thread; the OS is told to give up after the same time
+/// (`limit_connect_time`), so a cancelled or timed-out attempt does not linger in the
+/// background (Linux would otherwise keep resending the SYN for ~2 minutes).
 /// A plain blocking connect, not `connect_timeout`: on Windows a clone of a stream made by
 /// `connect_timeout` sometimes cannot be shut down (WSAENOTCONN, rust-lang/rust#163997),
 /// and the session relies on clones to cut a stalled connection on Stop.
 fn connect_one(a: SocketAddr, stop: &AtomicBool) -> io::Result<TcpStream> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(TcpStream::connect(a));
+        let attempt = || -> io::Result<TcpStream> {
+            let sock = socket2::Socket::new(
+                socket2::Domain::for_address(a),
+                socket2::Type::STREAM,
+                Some(socket2::Protocol::TCP),
+            )?;
+            limit_connect_time(&sock);
+            sock.connect(&a.into())?;
+            Ok(sock.into())
+        };
+        let _ = tx.send(attempt());
     });
     let deadline = Instant::now() + CONNECT_TIMEOUT;
     loop {
@@ -1415,6 +1431,45 @@ fn connect_one(a: SocketAddr, stop: &AtomicBool) -> io::Result<TcpStream> {
             }
         }
     }
+}
+
+/// Makes the OS itself give up a connect after about `CONNECT_TIMEOUT`. Linux: 3 SYN resends
+/// (after 1, 3 and 7 s, given up at 15 s). Windows: TCP_MAXRT, which `configure_socket` later
+/// sets again for the session. Best effort: elsewhere, or on failure, the OS default applies.
+fn limit_connect_time(sock: &socket2::Socket) {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        let syns: libc::c_int = 3;
+        // SAFETY: valid socket descriptor and a pointer to a live c_int of the given length.
+        unsafe {
+            libc::setsockopt(
+                sock.as_raw_fd(),
+                libc::IPPROTO_TCP,
+                libc::TCP_SYNCNT,
+                &syns as *const libc::c_int as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawSocket;
+        use windows_sys::Win32::Networking::WinSock::{IPPROTO_TCP, TCP_MAXRT, setsockopt};
+        let secs = CONNECT_TIMEOUT.as_secs() as i32;
+        // SAFETY: valid socket handle and a pointer to a live i32 of the given length.
+        unsafe {
+            setsockopt(
+                sock.as_raw_socket() as _,
+                IPPROTO_TCP,
+                TCP_MAXRT,
+                &secs as *const i32 as *const u8,
+                4,
+            );
+        }
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
+    let _ = sock;
 }
 
 /// A 169.254.x.x address (also IPv4-mapped IPv6).
@@ -1438,7 +1493,8 @@ fn connect_and_auth(
     configure_socket(&tcp)?;
     let killer = tcp.try_clone()?;
     let password = cfg.secure.then(|| secure::normalize_password(&cfg.password));
-    let stream = with_deadline(&killer, HANDSHAKE_TIMEOUT, || {
+    // Stop cuts a handshake in progress too (the socket is not in `sock` yet).
+    let stream = with_deadline(&killer, HANDSHAKE_TIMEOUT, Some(stop), || {
         secure::client_handshake(tcp, password.as_deref(), client_id)
     })?;
     if cfg.secure {

@@ -90,6 +90,13 @@ pub fn normalize_password(input: &str) -> String {
         .collect()
 }
 
+/// Whether `text` can be a password being typed: at most `PASSWORD_LEN` characters from the
+/// alphabet (either case), plus the separators `normalize_password` drops.
+pub fn is_password_input(text: &str) -> bool {
+    let pw = normalize_password(text);
+    pw.len() <= PASSWORD_LEN && pw.bytes().all(|b| PASSWORD_ALPHABET.contains(&b))
+}
+
 /// Groups a password for display: "abcd1234" -> "abcd 1234".
 pub fn display_password(pw: &str) -> String {
     if pw.chars().count() == PASSWORD_LEN {
@@ -540,6 +547,16 @@ impl SecureStream {
 mod tests {
     use super::*;
     use std::net::TcpListener;
+
+    #[test]
+    fn password_input() {
+        for ok in ["", "abcd", "ABCD 1234", "abcd-1234", " abcd1234 "] {
+            assert!(is_password_input(ok), "{ok:?}");
+        }
+        for bad in ["abcd 12345", "Password: abcd1234", "abc!", "ąbcd", "ab_cd"] {
+            assert!(!is_password_input(bad), "{bad:?}");
+        }
+    }
 
     #[test]
     fn digest_and_hmac_known_answers() {

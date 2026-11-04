@@ -306,19 +306,24 @@ pub fn small_button(ui: &mut egui::Ui, enabled: bool, text: &str) -> egui::Respo
     ui.add_enabled(enabled, egui::Button::new(text.to_string()).small())
 }
 
-/// Port entry: digits only, at most 5 of them, and never above 65535.
+/// Port entry that only ever holds a valid port (1-65535) or nothing. An edit that would make
+/// it anything else is undone, so a stray key does not silently change the number; spaces
+/// around a pasted value are dropped.
 pub fn port_field(ui: &mut egui::Ui, enabled: bool, port: &mut String) -> egui::Response {
-    let response = ui.add_enabled(
-        enabled,
-        egui::TextEdit::singleline(port).char_limit(5).desired_width(70.0),
-    );
+    let before = port.clone();
+    let response = ui.add_enabled(enabled, egui::TextEdit::singleline(port).desired_width(70.0));
     if response.changed() {
-        port.retain(|c| c.is_ascii_digit());
-        if port.parse::<u32>().is_ok_and(|p| p > u16::MAX as u32) {
-            *port = u16::MAX.to_string();
-        }
+        let text: String = port.chars().filter(|c| !c.is_whitespace()).collect();
+        *port = if is_port_input(&text) { text } else { before };
     }
     response
+}
+
+fn is_port_input(text: &str) -> bool {
+    text.is_empty()
+        || (text.len() <= 5
+            && text.bytes().all(|b| b.is_ascii_digit())
+            && text.parse::<u32>().is_ok_and(|p| (1..=u16::MAX as u32).contains(&p)))
 }
 
 /// Modal dialog with a dimmed backdrop: title, body, and right-aligned `[cancel] [primary]`.
@@ -596,5 +601,20 @@ impl LogView {
                         );
                     });
             });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn port_input() {
+        for ok in ["", "1", "13400", "65535"] {
+            assert!(is_port_input(ok), "{ok:?}");
+        }
+        for bad in ["0", "65536", "99999", "123456", "12a", "-1", "+80"] {
+            assert!(!is_port_input(bad), "{bad:?}");
+        }
     }
 }
