@@ -10,6 +10,9 @@ use super::{Confirm, widgets};
 use crate::settings::Settings;
 use crate::tunnel;
 
+/// Extra space between the port field and the Share/Listen button.
+const PORT_GAP: f32 = 16.0;
+
 pub struct ServerTab {
     pub(super) worker: Worker,
     picker: AdapterPicker,
@@ -161,8 +164,8 @@ impl ServerTab {
                     });
                 });
             } else {
-                // Refresh (84) + gap (16) + port (70) + Share/Stop (96) + spacing.
-                let combo_width = (ui.available_width() - 320.0).max(160.0);
+                // Refresh (84) + gap (16) + port (70) + PORT_GAP + Share/Stop (96) + spacing.
+                let combo_width = (ui.available_width() - 320.0 - PORT_GAP).max(160.0);
                 ui.vertical(|ui| {
                     widgets::caption(ui, "Network adapter");
                     self.picker.combo(ui, !running, combo_width);
@@ -189,6 +192,8 @@ impl ServerTab {
                 {
                     self.start(settings);
                 }
+                // The port is a setting, the button an action: not glued together.
+                ui.add_space(PORT_GAP);
                 ui.vertical(|ui| {
                     widgets::caption(ui, "Port");
                     ui.add_enabled(!running, egui::TextEdit::singleline(&mut self.port).desired_width(70.0));
