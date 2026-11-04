@@ -333,7 +333,7 @@ pub fn start_dhcp(log: &Logger) -> io::Result<Option<Box<dyn Send>>> {
         "DHCP started on '{}' (IPv4 only, no routes or DNS from the remote network; falls back to 169.254.x.x).",
         tap::IFNAME
     ));
-    let watch = super::watch_ipv4(|| ipv4_addresses().remove(tap::IFNAME).unwrap_or_default(), log);
+    let watch = super::watch_ipv4(|| ipv4_addresses().remove(tap::IFNAME).unwrap_or_default(), |_| {}, log);
     Ok(Some(Box::new(DhcpGuard {
         dhcp,
         _watch: watch,

@@ -190,7 +190,9 @@ impl Device {
     /// Opens the adapter. The virtual one gets its route priority at once, and its IPv4 too
     /// when `configure_ip` is set (otherwise later, see `VirtualIp::apply`); both again after
     /// a reopen, and the IPv4 is removed when the returned value is dropped.
-    fn open(&self, log: &Logger, configure_ip: bool) -> io::Result<OpenDevice> {
+    /// `link_local_first`: see `l2::start_dhcp`; off when the other end itself is at a
+    /// link-local address, so reconnects to it do not go into the tunnel.
+    fn open(&self, log: &Logger, configure_ip: bool, link_local_first: bool) -> io::Result<OpenDevice> {
         match self {
             Device::Share { id, name } => Ok(OpenDevice {
                 virt: None,
@@ -204,6 +206,7 @@ impl Device {
                     configured: Arc::default(),
                     closing: Arc::default(),
                     static_ipv4: *static_ipv4,
+                    link_local_first,
                     log: log.clone(),
                 };
                 if configure_ip {
@@ -253,6 +256,8 @@ struct VirtualIp {
     /// worker) must not configure the adapter again.
     closing: Arc<AtomicBool>,
     static_ipv4: Option<(Ipv4Addr, u8)>,
+    /// See `Device::open`.
+    link_local_first: bool,
     log: Logger,
 }
 
@@ -276,7 +281,7 @@ impl VirtualIp {
                 return;
             }
             *guard = None;
-            *guard = configure_client_ip(self.static_ipv4, &self.log);
+            *guard = configure_client_ip(self.static_ipv4, self.link_local_first, &self.log);
         }
         if renew {
             self.renew();
@@ -931,7 +936,9 @@ fn server_main(
     }
     log.status("Starting...");
     // The virtual adapter's IPv4 waits for the first client (see `Server::virt_ip`).
-    let device = cfg.device.open(log, false)?;
+    // Clients connect in, and Windows keeps an accepted connection on the adapter that owns
+    // its local address, so the tunnel's priority cannot take it over.
+    let device = cfg.device.open(log, false, true)?;
     let identity = ServerIdentity::generate()?;
     l2::prepare_listen(cfg.port, log);
     let listener = listen_dual_stack(cfg.port)
@@ -1372,6 +1379,14 @@ fn connect(host: &str, port: u16, stop: &AtomicBool) -> io::Result<TcpStream> {
     Err(last)
 }
 
+/// A 169.254.x.x address (also IPv4-mapped IPv6).
+fn is_link_local_v4(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_link_local(),
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().is_some_and(|v4| v4.is_link_local()),
+    }
+}
+
 /// Connects and authenticates; returns the stream and the server address.
 fn connect_and_auth(
     cfg: &ClientConfig,
@@ -1461,7 +1476,7 @@ fn client_main(
     // bothered. The virtual adapter only once the password was accepted, so a typo does not
     // make an adapter appear and disappear.
     let mut device = if cfg.device.shares() {
-        Some(cfg.device.open(log, true)?)
+        Some(cfg.device.open(log, true, false)?)
     } else {
         None
     };
@@ -1474,7 +1489,7 @@ fn client_main(
     // The adapter stays open across reconnects, so the OS keeps its link, IP and routes.
     let device = match device.take() {
         Some(d) => d,
-        None => cfg.device.open(log, true)?,
+        None => cfg.device.open(log, true, !is_link_local_v4(peer.ip()))?,
     };
     let port: Arc<dyn L2Port> = device.port.clone();
     let adapter = cfg.device.adapter_name().to_string();
@@ -1529,16 +1544,20 @@ fn client_main(
 }
 
 /// IPv4 on the client adapter: the static address, or DHCP. The guard undoes it when dropped.
-fn configure_client_ip(static_ipv4: Option<(Ipv4Addr, u8)>, log: &Logger) -> Option<Box<dyn Send>> {
+fn configure_client_ip(
+    static_ipv4: Option<(Ipv4Addr, u8)>,
+    link_local_first: bool,
+    log: &Logger,
+) -> Option<Box<dyn Send>> {
     match static_ipv4 {
-        Some((addr, prefix)) => match l2::apply_static_ipv4(addr, prefix, log) {
+        Some((addr, prefix)) => match l2::apply_static_ipv4(addr, prefix, link_local_first, log) {
             Ok(g) => Some(g),
             Err(e) => {
                 log.error(format!("Could not set static IPv4 {addr}/{prefix}: {e}"));
                 None
             }
         },
-        None => match l2::start_dhcp(log) {
+        None => match l2::start_dhcp(link_local_first, log) {
             Ok(g) => g,
             Err(e) => {
                 let fix = if e.kind() == io::ErrorKind::NotFound {

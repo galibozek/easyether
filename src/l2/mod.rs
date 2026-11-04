@@ -232,18 +232,39 @@ pub fn prefer_local_networks(log: &Logger) {
 }
 
 /// Optional static IPv4 on the client's virtual adapter. Dropping the guard removes it.
-pub fn apply_static_ipv4(addr: std::net::Ipv4Addr, prefix: u8, log: &Logger) -> io::Result<Box<dyn Send>> {
-    platform::apply_static_ipv4(addr, prefix, log)
+/// `link_local_first`: as in `start_dhcp`, for a static 169.254.x.x address.
+pub fn apply_static_ipv4(
+    addr: std::net::Ipv4Addr,
+    prefix: u8,
+    link_local_first: bool,
+    log: &Logger,
+) -> io::Result<Box<dyn Send>> {
+    #[cfg(windows)]
+    return platform::apply_static_ipv4(addr, prefix, link_local_first, log);
+    #[cfg(not(windows))]
+    {
+        let _ = link_local_first;
+        platform::apply_static_ipv4(addr, prefix, log)
+    }
 }
 
 /// "Automatic" IPv4 on the client's virtual adapter (Linux: dhcpcd; Windows runs DHCP on the
 /// adapter itself) and logs the address once it is there. Dropping the guard stops both.
-pub fn start_dhcp(log: &Logger) -> io::Result<Option<Box<dyn Send>>> {
-    #[cfg(any(windows, target_os = "linux"))]
-    return platform::start_dhcp(log);
+/// `link_local_first` (Windows): while the adapter has only a 169.254.x.x address, it gets a
+/// normal route priority instead of the lowest (`prefer_local_networks`). Without DHCP the
+/// remote network hands out no routes that could take over, and the low priority would send
+/// link-local broadcasts (a DoIP tester looking for a car) out of another adapter.
+pub fn start_dhcp(link_local_first: bool, log: &Logger) -> io::Result<Option<Box<dyn Send>>> {
+    #[cfg(windows)]
+    return platform::start_dhcp(link_local_first, log);
+    #[cfg(target_os = "linux")]
+    {
+        let _ = link_local_first;
+        platform::start_dhcp(log)
+    }
     #[cfg(not(any(windows, target_os = "linux")))]
     {
-        let _ = log;
+        let _ = (link_local_first, log);
         Ok(None)
     }
 }
@@ -275,8 +296,13 @@ impl Drop for AddressWatch {
 /// Logs the client adapter's IPv4 address (`lookup` lists its current ones) once the OS has
 /// one. A link-local fallback is logged too, and watching goes on in case a DHCP lease
 /// replaces it later; a lease wins over a link-local address that is still present.
+/// `on_change` gets each address logged.
 #[cfg(any(windows, target_os = "linux"))]
-pub(crate) fn watch_ipv4(lookup: impl Fn() -> Vec<std::net::Ipv4Addr> + Send + 'static, log: &Logger) -> AddressWatch {
+pub(crate) fn watch_ipv4(
+    lookup: impl Fn() -> Vec<std::net::Ipv4Addr> + Send + 'static,
+    mut on_change: impl FnMut(std::net::Ipv4Addr) + Send + 'static,
+    log: &Logger,
+) -> AddressWatch {
     // Windows waits about a minute for DHCP before it falls back to 169.254.x.x; dhcpcd on
     // Linux is much quicker (IPv4LL after ~10 s).
     #[cfg(windows)]
@@ -293,6 +319,7 @@ pub(crate) fn watch_ipv4(lookup: impl Fn() -> Vec<std::net::Ipv4Addr> + Send + '
             let addrs = lookup();
             let best = addrs.iter().find(|ip| !ip.is_link_local()).or(addrs.first()).copied();
             if let Some(ip) = best.filter(|ip| Some(*ip) != last) {
+                on_change(ip);
                 if ip.is_link_local() {
                     log.info(format!("IPv4 {ip} (link-local, no DHCP server answered) on '{name}'."));
                     last = Some(ip);

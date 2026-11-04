@@ -15,6 +15,38 @@ use crate::log::Logger;
 /// adapters (5 to 55), so any route through it loses against the same route via a local
 /// network. The same value the Linux client uses for its routes.
 const TUNNEL_METRIC: u32 = 9000;
+/// IPv4 interface metric while the adapter has only a link-local address (`LinkLocalFirst`):
+/// ahead of real adapters, so link-local and broadcast traffic goes into the tunnel. 1, as
+/// SoftEther's client sets; VPN adapters like Radmin's use 1 too, so anything higher loses
+/// the broadcasts to them.
+const LINK_LOCAL_METRIC: u32 = 1;
+
+/// Gives the adapter's IPv4 `LINK_LOCAL_METRIC` while it exists and `TUNNEL_METRIC` again
+/// when dropped. Only while the adapter has nothing but a 169.254.x.x address: no DHCP server
+/// means no gateway or routes from the remote network that could take over, while the low
+/// priority sent link-local broadcasts (a DoIP tester looking for the car) and 169.254.x.x
+/// traffic out of any other adapter without DHCP.
+struct LinkLocalFirst {
+    luid: u64,
+    log: Logger,
+}
+
+impl LinkLocalFirst {
+    fn new(luid: u64, log: &Logger) -> LinkLocalFirst {
+        if set_metric(NET_LUID_LH { Value: luid }, AF_INET, LINK_LOCAL_METRIC, log) == Some(true) {
+            log.info(format!(
+                "'{CLIENT_ADAPTER_NAME}' has only a link-local address: it now comes first for link-local (169.254.x.x) and broadcast traffic."
+            ));
+        }
+        LinkLocalFirst { luid, log: log.clone() }
+    }
+}
+
+impl Drop for LinkLocalFirst {
+    fn drop(&mut self) {
+        set_metric(NET_LUID_LH { Value: self.luid }, AF_INET, TUNNEL_METRIC, &self.log);
+    }
+}
 
 struct AddressGuard {
     row: Box<MIB_UNICASTIPADDRESS_ROW>,
@@ -129,7 +161,7 @@ pub fn prefer_local_networks(log: &Logger) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let mut pending = vec![AF_INET, AF_INET6];
     loop {
-        pending.retain(|&family| !set_tunnel_metric(luid, family, log));
+        pending.retain(|&family| set_metric(luid, family, TUNNEL_METRIC, log).is_none());
         if !pending.contains(&AF_INET) || std::time::Instant::now() >= deadline {
             break;
         }
@@ -142,9 +174,9 @@ pub fn prefer_local_networks(log: &Logger) {
     }
 }
 
-/// One attempt for one address family. `false` only when the interface does not exist (yet);
-/// a failure to set it is logged and counts as done.
-fn set_tunnel_metric(luid: NET_LUID_LH, family: u16, log: &Logger) -> bool {
+/// One attempt for one address family. `None` when the interface does not exist (yet);
+/// otherwise whether it worked (a failure is logged).
+fn set_metric(luid: NET_LUID_LH, family: u16, metric: u32, log: &Logger) -> Option<bool> {
     // SAFETY: MIB_IPINTERFACE_ROW is plain old data; all-zero is a valid value.
     let mut row: MIB_IPINTERFACE_ROW = unsafe { std::mem::zeroed() };
     // SAFETY: `row` is a valid, exclusively borrowed row for the call.
@@ -153,37 +185,62 @@ fn set_tunnel_metric(luid: NET_LUID_LH, family: u16, log: &Logger) -> bool {
     row.InterfaceLuid = luid;
     // SAFETY: `row` names the interface by family and LUID; the call fills in the rest.
     if unsafe { ffi::GetIpInterfaceEntry(&mut row) } != 0 {
-        return false;
+        return None;
     }
     // SetIpInterfaceEntry rejects IPv4 rows that carry a site prefix length.
     if family == AF_INET {
         row.SitePrefixLength = 0;
     }
     row.UseAutomaticMetric = false;
-    row.Metric = TUNNEL_METRIC;
+    row.Metric = metric;
     // SAFETY: `row` was filled by GetIpInterfaceEntry and only adjusted above.
     let r = unsafe { ffi::SetIpInterfaceEntry(&mut row) };
     if r != 0 {
-        log.warn(format!(
-            "Could not lower the route priority of '{CLIENT_ADAPTER_NAME}' ({}): routes from the remote network may compete with local ones.",
-            io::Error::from_raw_os_error(r as i32)
-        ));
-        return true;
+        let e = io::Error::from_raw_os_error(r as i32);
+        if metric == TUNNEL_METRIC {
+            log.warn(format!(
+                "Could not lower the route priority of '{CLIENT_ADAPTER_NAME}' ({e}): routes from the remote network may compete with local ones."
+            ));
+        } else {
+            log.warn(format!(
+                "Could not raise the route priority of '{CLIENT_ADAPTER_NAME}' ({e}): link-local broadcasts may leave through another adapter."
+            ));
+        }
+        return Some(false);
     }
     // Separate call: older Windows versions reject the field, and the metric must not depend
     // on it.
     row.DisableDefaultRoutes = true;
     // SAFETY: as above.
     let _ = unsafe { ffi::SetIpInterfaceEntry(&mut row) };
-    true
+    Some(true)
 }
 
 /// Windows runs DHCP (with the 169.254.x.x fallback) on the adapter by itself; only report
 /// the address it gets.
-pub fn start_dhcp(log: &Logger) -> io::Result<Option<Box<dyn Send>>> {
+/// With `link_local_first`, the adapter comes first (`LinkLocalFirst`) while it has only a
+/// 169.254.x.x fallback address, until a DHCP lease replaces it.
+pub fn start_dhcp(link_local_first: bool, log: &Logger) -> io::Result<Option<Box<dyn Send>>> {
     // SAFETY: Value covers the whole union.
     let luid = unsafe { neo_luid()?.Value };
-    Ok(Some(Box::new(crate::l2::watch_ipv4(move || current_ipv4(luid), log))))
+    let first: std::sync::Arc<std::sync::Mutex<Option<LinkLocalFirst>>> = Default::default();
+    let on_change = {
+        let (first, log) = (first.clone(), log.clone());
+        move |ip: Ipv4Addr| {
+            if !link_local_first {
+                return;
+            }
+            let mut first = first.lock().unwrap();
+            if !ip.is_link_local() {
+                *first = None;
+            } else if first.is_none() {
+                *first = Some(LinkLocalFirst::new(luid, &log));
+            }
+        }
+    };
+    let watch = crate::l2::watch_ipv4(move || current_ipv4(luid), on_change, log);
+    // The watch stops first; a `LinkLocalFirst` its thread still holds goes when that ends.
+    Ok(Some(Box::new((watch, first))))
 }
 
 /// Asks Windows' DHCP client for a lease on the Neo adapter now (a fresh request also after it
@@ -236,7 +293,7 @@ pub fn renew_dhcp(log: &Logger) {
     }
 }
 
-pub fn apply(addr: Ipv4Addr, prefix: u8, log: &Logger) -> io::Result<Box<dyn Send>> {
+pub fn apply(addr: Ipv4Addr, prefix: u8, link_local_first: bool, log: &Logger) -> io::Result<Box<dyn Send>> {
     let luid = neo_luid()?;
 
     // SAFETY: a zeroed row is valid input for InitializeUnicastIpAddressEntry.
@@ -261,5 +318,12 @@ pub fn apply(addr: Ipv4Addr, prefix: u8, log: &Logger) -> io::Result<Box<dyn Sen
         e => return Err(io::Error::from_raw_os_error(e as i32)),
     };
     log.info(format!("Static IPv4 {addr}/{prefix} set on '{CLIENT_ADAPTER_NAME}'."));
-    Ok(Box::new(AddressGuard { row, owned }))
+    let address = AddressGuard { row, owned };
+    if link_local_first && addr.is_link_local() {
+        // SAFETY: Value covers the whole union.
+        let first = LinkLocalFirst::new(unsafe { luid.Value }, log);
+        // The metric goes back first, then the address.
+        return Ok(Box::new((first, address)));
+    }
+    Ok(Box::new(address))
 }
