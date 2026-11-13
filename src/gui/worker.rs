@@ -192,7 +192,7 @@ pub struct Invite {
     local_ip6: Option<std::net::Ipv6Addr>,
     /// All IPv4 addresses with their interface names, for the "My address" hover.
     addresses: Vec<(String, std::net::Ipv4Addr)>,
-    /// "Copied to clipboard" after Copy or a click on the address.
+    /// "Copied to clipboard" after a click on the password or the address.
     copied: widgets::Copied,
 }
 
@@ -244,17 +244,24 @@ impl Invite {
         self.addresses = crate::l2::local_ipv4();
     }
 
-    /// The password with Copy and New password. Returns true when New password was clicked.
+    /// The password (a click copies it, like "My address") and New password. Returns true when
+    /// New password was clicked.
     pub fn password_ui(&mut self, ui: &mut egui::Ui) -> bool {
-        ui.label(
-            RichText::new(crate::secure::display_password(&self.password))
-                .monospace()
-                .size(20.0)
-                .strong(),
-        );
-        let copy = widgets::small_button(ui, true, "Copy");
-        if copy.clicked() {
-            self.copied.copy(ui.ctx(), self.password.clone(), &copy);
+        let text = RichText::new(crate::secure::display_password(&self.password))
+            .monospace()
+            .size(20.0)
+            .strong();
+        let resp = ui
+            .add(egui::Label::new(text).sense(egui::Sense::click()))
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        // egui hides a tooltip on click; the "Copied" note replaces it meanwhile.
+        let resp = if self.copied.active() {
+            resp
+        } else {
+            resp.on_hover_text("Click to copy")
+        };
+        if resp.clicked() {
+            self.copied.copy(ui.ctx(), self.password.clone(), &resp);
         }
         widgets::small_button(ui, true, "New password")
             .on_hover_text("A connected peer is disconnected, since its password stops being valid.")
