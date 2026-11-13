@@ -55,7 +55,7 @@ windows-sys = { version = "0.61", features = [
 [build-dependencies]
 winresource = "0.1"
 # Renders assets/logo.svg at build time (bitmaps embedded by src/logo.rs, .ico on Windows).
-resvg = { version = "0.49", default-features = false }
+resvg = { version = "0.50", default-features = false }
 
 [profile.release]
 lto = true
