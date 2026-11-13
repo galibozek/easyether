@@ -39,15 +39,18 @@ const STALL: Duration = Duration::from_secs(3);
 /// Bounds the queue in front of diagnostic frames under bulk traffic; data in flight is not
 /// limited, so throughput is not either.
 #[cfg(target_os = "linux")]
-const NOTSENT_LOWAT: i32 = 128 << 10;
+const NOTSENT_LOWAT: u32 = 128 << 10;
 /// Reconnect delays in seconds: first retry at once, then backing off.
 const RECONNECT_DELAYS: [u64; 5] = [0, 1, 2, 5, 10];
 /// Hard limit for the whole handshake (TLS + password), against slow or stalled clients.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-/// Per-attempt TCP connect limit. Long enough for the SYN to be sent three times (Windows
-/// resends after 3 and 9 s, Linux after 1, 3 and 7 s), so one lost SYN or reply on a weak link
-/// (LTE, VPN over it) does not fail the attempt. Stop does not wait for it (`connect_one`).
+/// Per-address TCP connect limit. Long enough for the SYN to be sent three times (Windows
+/// resends after 3 and 9 s, Linux sooner), so one lost SYN or reply on a weak link (LTE, VPN
+/// over it) does not fail the attempt. Stop does not wait for it (`connect`).
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// Head start of one address over the next (RFC 8305 suggests 250 ms): a host name with a dead
+/// IPv6 path and a working IPv4 one connects after this long, not after `CONNECT_TIMEOUT`.
+const CONNECT_STAGGER: Duration = Duration::from_millis(300);
 /// Unauthenticated connections handled at once; more are closed immediately.
 const MAX_HANDSHAKES: usize = 8;
 /// Wrong passwords from one IP before it is blocked for `BAN_TIME`.
@@ -324,20 +327,7 @@ fn configure_socket(tcp: &TcpStream) -> io::Result<()> {
     // not-yet-sent part short without limiting throughput; Windows sizes its send buffer from
     // the measured bandwidth-delay product.
     #[cfg(target_os = "linux")]
-    {
-        use std::os::fd::AsRawFd;
-        let lowat: libc::c_int = NOTSENT_LOWAT;
-        // SAFETY: valid socket descriptor and a pointer to a live c_int of the given length.
-        unsafe {
-            libc::setsockopt(
-                tcp.as_raw_fd(),
-                libc::IPPROTO_TCP,
-                libc::TCP_NOTSENT_LOWAT,
-                &lowat as *const libc::c_int as *const libc::c_void,
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            );
-        }
-    }
+    let _ = s.set_tcp_notsent_lowat(NOTSENT_LOWAT);
     let ka = socket2::TcpKeepalive::new()
         .with_time(Duration::from_secs(10))
         .with_interval(Duration::from_secs(5));
@@ -348,22 +338,26 @@ fn configure_socket(tcp: &TcpStream) -> io::Result<()> {
     let _ = s.set_tcp_user_timeout(Some(peer_timeout));
     // Windows equivalent: TCP_MAXRT, the maximum retransmission time in seconds.
     #[cfg(windows)]
-    {
-        use std::os::windows::io::AsRawSocket;
-        use windows_sys::Win32::Networking::WinSock::{IPPROTO_TCP, TCP_MAXRT, setsockopt};
-        let secs = peer_timeout.as_secs() as i32;
-        // SAFETY: valid socket handle and a pointer to a live i32 of the given length.
-        unsafe {
-            setsockopt(
-                tcp.as_raw_socket() as _,
-                IPPROTO_TCP,
-                TCP_MAXRT,
-                &secs as *const i32 as *const u8,
-                4,
-            );
-        }
-    }
+    set_max_rt(tcp, peer_timeout);
     Ok(())
+}
+
+/// Windows: sets TCP_MAXRT, the maximum retransmission time (whole seconds), which also limits
+/// a connect. Best effort: on failure the OS default applies.
+#[cfg(windows)]
+fn set_max_rt(sock: &impl std::os::windows::io::AsRawSocket, limit: Duration) {
+    use windows_sys::Win32::Networking::WinSock::{IPPROTO_TCP, TCP_MAXRT, setsockopt};
+    let secs = limit.as_secs() as i32;
+    // SAFETY: valid socket handle and a pointer to a live i32 of the given length.
+    unsafe {
+        setsockopt(
+            sock.as_raw_socket() as _,
+            IPPROTO_TCP,
+            TCP_MAXRT,
+            &secs as *const i32 as *const u8,
+            4,
+        );
+    }
 }
 
 /// The running session on the server: its stop flag plus a socket handle so it can be
@@ -742,10 +736,8 @@ fn run_session(
 }
 
 /// Runs `f`, shutting the socket down if it takes longer than `limit` or `stop` is set.
-fn with_deadline<T>(tcp: &TcpStream, limit: Duration, stop: Option<&AtomicBool>, f: impl FnOnce() -> T) -> T {
-    let Ok(killer) = tcp.try_clone() else {
-        return f();
-    };
+/// `killer` is a handle to the socket `f` works on (a clone, as `f` usually owns the stream).
+fn with_deadline<T>(killer: &TcpStream, limit: Duration, stop: Option<&AtomicBool>, f: impl FnOnce() -> T) -> T {
     let done = AtomicBool::new(false);
     std::thread::scope(|s| {
         let watcher = s.spawn(|| {
@@ -1286,7 +1278,9 @@ fn listen_dual_stack(port: u16) -> io::Result<TcpListener> {
 
 /// Resolves what the user typed as the server address: a host name, an IPv4 or IPv6 literal
 /// (with or without brackets), or a link-local IPv6 with a zone (`fe80::1%eth0`, `fe80::1%12`).
-fn resolve(host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
+/// A name lookup blocks in the OS resolver (for many seconds when the network is down), so it
+/// runs on its own thread and is abandoned at once when stop is requested.
+fn resolve(host: &str, port: u16, stop: &AtomicBool) -> io::Result<Vec<SocketAddr>> {
     use std::net::{IpAddr, Ipv6Addr, SocketAddrV6};
     let host = host.trim().trim_start_matches('[').trim_end_matches(']');
     if let Some((addr, zone)) = host.split_once('%') {
@@ -1306,10 +1300,13 @@ fn resolve(host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
     if let Ok(ip) = host.parse::<IpAddr>() {
         return Ok(vec![SocketAddr::new(ip, port)]);
     }
-    Ok((host, port)
-        .to_socket_addrs()
-        .map_err(|e| io::Error::new(e.kind(), format!("cannot resolve '{host}': {e}")))?
-        .collect())
+    let (tx, rx) = std::sync::mpsc::channel();
+    let name = host.to_string();
+    std::thread::spawn(move || {
+        let _ = tx.send((name.as_str(), port).to_socket_addrs().map(|a| a.collect::<Vec<_>>()));
+    });
+    let found = recv_unless_stopped(&rx, stop, None)?.unwrap_or_else(|| Ok(Vec::new()));
+    found.map_err(|e| io::Error::new(e.kind(), format!("cannot resolve '{host}': {e}")))
 }
 
 /// Interface index for an IPv6 zone given by name (Linux: `eth0`; Windows zones are numeric).
@@ -1376,100 +1373,239 @@ pub fn start_client(cfg: ClientConfig, log: Logger) -> TunnelHandle {
     }
 }
 
-fn connect(host: &str, port: u16, stop: &AtomicBool) -> io::Result<TcpStream> {
-    let addrs = resolve(host, port)?;
-    let mut last = io::Error::new(io::ErrorKind::NotFound, format!("no address for '{host}'"));
-    for a in addrs {
-        if stop.load(Ordering::SeqCst) {
-            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
-        }
-        match connect_one(a, stop) {
-            Ok(s) => return Ok(s),
-            // A cancel, not an EINTR from the OS: only then the other addresses are skipped.
-            Err(e) if stop.load(Ordering::SeqCst) => return Err(e),
-            Err(e) => last = io::Error::new(e.kind(), format!("cannot connect to {a}: {e}")),
-        }
-    }
-    Err(last)
+/// The error of a connect given up because stop was requested.
+fn cancelled() -> io::Error {
+    io::Error::new(io::ErrorKind::Interrupted, "cancelled")
 }
 
-/// One connect attempt (up to `CONNECT_TIMEOUT`) that returns at once when stop is requested.
-/// The attempt runs on its own thread; the OS is told to give up after the same time
-/// (`limit_connect_time`), so a cancelled or timed-out attempt does not linger in the
-/// background (Linux would otherwise keep resending the SYN for ~2 minutes).
-/// A plain blocking connect, not `connect_timeout`: on Windows a clone of a stream made by
-/// `connect_timeout` sometimes cannot be shut down (WSAENOTCONN, rust-lang/rust#163997),
-/// and the session relies on clones to cut a stalled connection on Stop.
-fn connect_one(a: SocketAddr, stop: &AtomicBool) -> io::Result<TcpStream> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let attempt = || -> io::Result<TcpStream> {
-            let sock = socket2::Socket::new(
-                socket2::Domain::for_address(a),
-                socket2::Type::STREAM,
-                Some(socket2::Protocol::TCP),
-            )?;
-            limit_connect_time(&sock);
-            sock.connect(&a.into())?;
-            Ok(sock.into())
-        };
-        let _ = tx.send(attempt());
-    });
-    let deadline = Instant::now() + CONNECT_TIMEOUT;
+/// Waits for the result a helper thread sends, so that a blocking OS call (name lookup, connect)
+/// does not keep the caller from stopping: `Err` at once when stop is requested, `Ok(None)` when
+/// nothing came by `until`.
+fn recv_unless_stopped<T>(
+    rx: &std::sync::mpsc::Receiver<T>,
+    stop: &AtomicBool,
+    until: Option<Instant>,
+) -> io::Result<Option<T>> {
+    use std::sync::mpsc::RecvTimeoutError;
     loop {
-        match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(r) => return r,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) if stop.load(Ordering::SeqCst) => {
-                return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+        if stop.load(Ordering::SeqCst) {
+            return Err(cancelled());
+        }
+        let mut wait = Duration::from_millis(100);
+        if let Some(until) = until {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Ok(rx.try_recv().ok());
             }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) if Instant::now() >= deadline => {
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "connection timed out"));
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                return Err(io::Error::other("connect thread ended"));
-            }
+            wait = wait.min(left);
+        }
+        match rx.recv_timeout(wait) {
+            Ok(value) => return Ok(Some(value)),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return Err(io::Error::other("helper thread ended")),
         }
     }
 }
 
-/// Makes the OS itself give up a connect after about `CONNECT_TIMEOUT`. Linux: 3 SYN resends
-/// (after 1, 3 and 7 s, given up at 15 s). Windows: TCP_MAXRT, which `configure_socket` later
-/// sets again for the session. Best effort: elsewhere, or on failure, the OS default applies.
-fn limit_connect_time(sock: &socket2::Socket) {
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::fd::AsRawFd;
-        let syns: libc::c_int = 3;
-        // SAFETY: valid socket descriptor and a pointer to a live c_int of the given length.
-        unsafe {
-            libc::setsockopt(
-                sock.as_raw_fd(),
-                libc::IPPROTO_TCP,
-                libc::TCP_SYNCNT,
-                &syns as *const libc::c_int as *const libc::c_void,
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            );
+/// The connect attempts in flight, each with the socket its thread is connecting. Those still
+/// in flight when `connect` returns (another address won, stop, timeout) are cut
+/// (`abort_connect`), so that an attempt nobody waits for does not get through to the server
+/// later, as a connection that is closed at once and logged there as rejected.
+#[derive(Default)]
+struct InFlight(Vec<(SocketAddr, Arc<socket2::Socket>)>);
+
+impl InFlight {
+    /// Takes an attempt that ended off the list, with its socket.
+    fn take(&mut self, a: SocketAddr) -> Option<Arc<socket2::Socket>> {
+        let i = self.0.iter().position(|(p, _)| *p == a)?;
+        Some(self.0.swap_remove(i).1)
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        for (_, sock) in &self.0 {
+            abort_connect(sock);
         }
     }
+}
+
+/// Ends a blocking connect that another thread is in, best effort (without it the attempt
+/// runs on until it gets through or `limit_connect_time` ends it). Linux: a shutdown, which
+/// ends a connect in progress. Windows: a shutdown does nothing to a socket that is not
+/// connected yet; the pending connect request is cancelled instead.
+fn abort_connect(sock: &socket2::Socket) {
+    #[cfg(not(windows))]
+    let _ = sock.shutdown(std::net::Shutdown::Both);
     #[cfg(windows)]
     {
         use std::os::windows::io::AsRawSocket;
-        use windows_sys::Win32::Networking::WinSock::{IPPROTO_TCP, TCP_MAXRT, setsockopt};
-        let secs = CONNECT_TIMEOUT.as_secs() as i32;
-        // SAFETY: valid socket handle and a pointer to a live i32 of the given length.
+        use windows_sys::Win32::System::IO::CancelIoEx;
+        // SAFETY: a valid socket handle (the caller holds the socket); a null OVERLAPPED
+        // means every request pending on the handle.
         unsafe {
-            setsockopt(
-                sock.as_raw_socket() as _,
-                IPPROTO_TCP,
-                TCP_MAXRT,
-                &secs as *const i32 as *const u8,
-                4,
-            );
+            CancelIoEx(sock.as_raw_socket() as _, std::ptr::null());
         }
     }
+}
+
+/// Connects to the first address of `host` that answers. The addresses are tried in the
+/// resolver's order, each on its own thread and `CONNECT_STAGGER` after the one before (at once
+/// when nothing else is in flight), so a dead address does not hold up a working one. Returns
+/// at once when stop is requested.
+fn connect(host: &str, port: u16, stop: &AtomicBool) -> io::Result<TcpStream> {
+    // Attempts are told apart by address, and the resolver may list one twice (a name that is
+    // twice in the hosts file).
+    let mut addrs: Vec<SocketAddr> = Vec::new();
+    for a in resolve(host, port, stop)? {
+        if !addrs.contains(&a) {
+            addrs.push(a);
+        }
+    }
+    if addrs.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("no address for '{host}'"),
+        ));
+    }
+    connect_first(addrs, stop)
+}
+
+/// `connect` for addresses already resolved (no address twice).
+fn connect_first(addrs: Vec<SocketAddr>, stop: &AtomicBool) -> io::Result<TcpStream> {
+    let mut addrs = addrs.into_iter();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut last = io::Error::new(io::ErrorKind::NotFound, "no address to connect to");
+    let mut pending = InFlight::default();
+    let mut next_at = Instant::now();
+    let mut deadline = next_at;
+    loop {
+        if stop.load(Ordering::SeqCst) {
+            return Err(cancelled());
+        }
+        let now = Instant::now();
+        if (pending.0.is_empty() || now >= next_at)
+            && let Some(a) = addrs.next()
+        {
+            match connect_socket(a) {
+                Ok(sock) => {
+                    let sock = Arc::new(sock);
+                    pending.0.push((a, sock.clone()));
+                    let tx = tx.clone();
+                    std::thread::spawn(move || {
+                        let result = connect_one(&sock, a);
+                        // Let go before the result is sent, so that whoever receives it holds
+                        // the only handle (and a result nobody waits for closes the socket).
+                        drop(sock);
+                        let _ = tx.send((a, result));
+                    });
+                    next_at = now + CONNECT_STAGGER;
+                    deadline = now + CONNECT_TIMEOUT;
+                }
+                // E.g. an IPv6 address on a computer without IPv6: on to the next one.
+                Err(e) => {
+                    last = io::Error::new(e.kind(), format!("cannot connect to {a}: {e}"));
+                    continue;
+                }
+            }
+        }
+        if pending.0.is_empty() {
+            return Err(last);
+        }
+        // Up to the next address's turn, if there is one, or else to the time limit.
+        let until = if addrs.len() > 0 {
+            next_at.min(deadline)
+        } else {
+            deadline
+        };
+        match recv_unless_stopped(&rx, stop, Some(until))? {
+            Some((a, result)) => {
+                // Off the list first: the winner must not be cut with the attempts that lost.
+                let sock = pending.take(a);
+                match result {
+                    Ok(()) => {
+                        let sock = sock
+                            .and_then(Arc::into_inner)
+                            .ok_or_else(|| io::Error::other("connect socket still in use"))?;
+                        return Ok(sock.into());
+                    }
+                    Err(e) => last = io::Error::new(e.kind(), format!("cannot connect to {a}: {e}")),
+                }
+            }
+            None if Instant::now() >= deadline => {
+                let tried: Vec<String> = pending.0.iter().map(|(a, _)| a.to_string()).collect();
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("cannot connect to {}: connection timed out", tried.join(", ")),
+                ));
+            }
+            None => {}
+        }
+    }
+}
+
+/// A socket for one connect attempt to `a`, which the OS gives up after `CONNECT_TIMEOUT`.
+fn connect_socket(a: SocketAddr) -> io::Result<socket2::Socket> {
+    let sock = socket2::Socket::new(
+        socket2::Domain::for_address(a),
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )?;
+    limit_connect_time(&sock, CONNECT_TIMEOUT);
+    Ok(sock)
+}
+
+/// One blocking connect attempt.
+/// A plain blocking connect, not `connect_timeout`: on Windows a clone of a stream made by
+/// `connect_timeout` sometimes cannot be shut down (WSAENOTCONN, rust-lang/rust#163997),
+/// and the session relies on clones to cut a stalled connection on Stop.
+fn connect_one(sock: &socket2::Socket, a: SocketAddr) -> io::Result<()> {
+    match sock.connect(&a.into()) {
+        #[cfg(unix)]
+        Err(e) if e.kind() == io::ErrorKind::Interrupted => finish_connect(sock),
+        r => r,
+    }
+}
+
+/// Waits out a connect that a signal interrupted (EINTR): the connection keeps being
+/// established in the background, and its result is read once the socket becomes writable.
+#[cfg(unix)]
+fn finish_connect(sock: &socket2::Socket) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let mut fd = libc::pollfd {
+        fd: sock.as_raw_fd(),
+        events: libc::POLLOUT,
+        revents: 0,
+    };
+    loop {
+        // SAFETY: a pointer to one live pollfd, and the count 1.
+        if unsafe { libc::poll(&mut fd, 1, -1) } >= 0 {
+            break;
+        }
+        let e = io::Error::last_os_error();
+        if e.kind() != io::ErrorKind::Interrupted {
+            return Err(e);
+        }
+    }
+    match sock.take_error()? {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+/// Makes the OS itself give up a connect after `limit`, so an abandoned attempt does not linger
+/// (Linux would otherwise keep resending the SYN for minutes). Linux: TCP_USER_TIMEOUT, which
+/// `configure_socket` later sets again for the session; not TCP_SYNCNT, as how long a number of
+/// SYNs takes depends on the kernel version and on net.ipv4.tcp_syn_linear_timeouts, and it
+/// must not come out shorter than the limit. Windows: TCP_MAXRT, likewise set again later.
+/// Best effort: elsewhere, or on failure, the (longer) OS default applies.
+fn limit_connect_time(sock: &socket2::Socket, limit: Duration) {
+    #[cfg(target_os = "linux")]
+    let _ = sock.set_tcp_user_timeout(Some(limit));
+    #[cfg(windows)]
+    set_max_rt(sock, limit);
     #[cfg(not(any(target_os = "linux", windows)))]
-    let _ = sock;
+    let _ = (sock, limit);
 }
 
 /// A 169.254.x.x address (also IPv4-mapped IPv6).
@@ -1546,8 +1682,9 @@ fn retry_connect(
         log.status(format!("Connecting (attempt {attempt})..."));
         match connect_and_auth(cfg, client_id, stop, log) {
             Ok(s) => return Some(Ok(s)),
-            Err(e) if secure::is_fatal_handshake_error(&e) => return Some(Err(e)),
+            // The user's own Disconnect wins over whatever error cutting the attempt produced.
             Err(_) if stop.load(Ordering::SeqCst) => return None,
+            Err(e) if secure::is_fatal_handshake_error(&e) => return Some(Err(e)),
             Err(e) => log.warn(format!("Connection attempt {attempt} failed: {e}")),
         }
     }
@@ -1713,16 +1850,16 @@ mod tests {
 
     #[test]
     fn resolves_literals_and_zones() {
-        let v4 = resolve("192.168.1.5", 5555).unwrap();
+        let v4 = resolve("192.168.1.5", 5555, &AtomicBool::new(false)).unwrap();
         assert_eq!(v4[0].to_string(), "192.168.1.5:5555");
-        let v6 = resolve("[fe80::1]", 5555).unwrap();
+        let v6 = resolve("[fe80::1]", 5555, &AtomicBool::new(false)).unwrap();
         assert_eq!(v6[0].to_string(), "[fe80::1]:5555");
-        let zoned = resolve("fe80::1%7", 5555).unwrap();
+        let zoned = resolve("fe80::1%7", 5555, &AtomicBool::new(false)).unwrap();
         match zoned[0] {
             SocketAddr::V6(a) => assert_eq!(a.scope_id(), 7),
             _ => panic!("expected IPv6"),
         }
-        assert!(resolve("fe80::1%no-such-interface", 5555).is_err());
+        assert!(resolve("fe80::1%no-such-interface", 5555, &AtomicBool::new(false)).is_err());
         assert_eq!(
             canonical("[::ffff:10.0.0.1]:1".parse().unwrap()).to_string(),
             "10.0.0.1:1"
@@ -1796,24 +1933,97 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn tunnel_socket_bounds_unsent_data() {
-        use std::os::fd::AsRawFd;
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let tcp = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         configure_socket(&tcp).unwrap();
-        let mut value: libc::c_int = 0;
-        let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
-        // SAFETY: valid descriptor; value and len are live and sized for the option.
-        let r = unsafe {
-            libc::getsockopt(
-                tcp.as_raw_fd(),
-                libc::IPPROTO_TCP,
-                libc::TCP_NOTSENT_LOWAT,
-                &mut value as *mut libc::c_int as *mut libc::c_void,
-                &mut len,
-            )
+        assert_eq!(socket2::SockRef::from(&tcp).tcp_notsent_lowat().unwrap(), NOTSENT_LOWAT);
+    }
+
+    #[test]
+    fn connect_reaches_a_listener() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stop = AtomicBool::new(false);
+        let tcp = connect("127.0.0.1", addr.port(), &stop).unwrap();
+        assert_eq!(tcp.peer_addr().unwrap(), addr);
+    }
+
+    /// A listener that no longer answers: its accept queue is full, so the kernel drops every
+    /// further SYN and a connect to it hangs as it would to an unreachable host. Returned with
+    /// the connections that fill the queue.
+    #[cfg(target_os = "linux")]
+    fn deaf_listener() -> (SocketAddr, socket2::Socket, Vec<TcpStream>) {
+        use socket2::{Domain, Protocol, Socket, Type};
+        let listener = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
+        listener.bind(&SocketAddr::from(([127, 0, 0, 1], 0)).into()).unwrap();
+        listener.listen(0).unwrap();
+        let addr = listener.local_addr().unwrap().as_socket().unwrap();
+        let mut held = Vec::new();
+        while let Ok(s) = TcpStream::connect_timeout(&addr, Duration::from_millis(300)) {
+            held.push(s);
+            assert!(held.len() < 64, "the accept queue never filled up");
+        }
+        (addr, listener, held)
+    }
+
+    /// What `InFlight` relies on to cut the attempts that lost.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn abort_cuts_a_connect_in_progress() {
+        let (addr, _listener, _held) = deaf_listener();
+        let sock = Arc::new(connect_socket(addr).unwrap());
+        let attempt = {
+            let sock = sock.clone();
+            std::thread::spawn(move || connect_one(&sock, addr))
         };
-        assert_eq!(r, 0);
-        assert_eq!(value, NOTSENT_LOWAT);
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!attempt.is_finished());
+        let start = Instant::now();
+        abort_connect(&sock);
+        assert!(attempt.join().unwrap().is_err());
+        assert!(start.elapsed() < Duration::from_secs(1), "{:?}", start.elapsed());
+    }
+
+    /// The OS limit of a connect is the time asked for, not a number of SYNs that maps to
+    /// some other time.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn connect_time_limit_is_kept() {
+        let (addr, _listener, _held) = deaf_listener();
+        let sock = connect_socket(addr).unwrap();
+        limit_connect_time(&sock, Duration::from_secs(2));
+        let start = Instant::now();
+        let e = connect_one(&sock, addr).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::TimedOut);
+        let took = start.elapsed();
+        assert!(
+            took >= Duration::from_millis(1900) && took < Duration::from_secs(4),
+            "{took:?}"
+        );
+    }
+
+    /// An address that does not answer must not hold up one that does, and the attempt to it
+    /// is not left behind.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dead_address_does_not_hold_up_a_working_one() {
+        let (dead, _listener, _held) = deaf_listener();
+        let live = TcpListener::bind("127.0.0.1:0").unwrap();
+        let live_addr = live.local_addr().unwrap();
+        let start = Instant::now();
+        let tcp = connect_first(vec![dead, live_addr], &AtomicBool::new(false)).unwrap();
+        assert_eq!(tcp.peer_addr().unwrap(), live_addr);
+        let took = start.elapsed();
+        assert!(took >= CONNECT_STAGGER && took < Duration::from_secs(2), "{took:?}");
+    }
+
+    #[test]
+    fn connect_returns_at_once_when_stopped() {
+        let stop = AtomicBool::new(true);
+        let start = Instant::now();
+        let e = connect("192.0.2.1", 5555, &stop).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::Interrupted);
+        assert!(start.elapsed() < Duration::from_secs(1));
     }
 
     #[test]
