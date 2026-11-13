@@ -264,7 +264,29 @@ pub fn top_row_height(ui: &mut egui::Ui) {
     ui.set_min_height(caption + ui.spacing().item_spacing.y + 32.0);
 }
 
-/// "Copied to clipboard" shown under the control that copied, for two seconds.
+/// How long a passing note ("Copied to clipboard", the rule of a field) stays up.
+const NOTE_SHOWN_FOR: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Whether a note shown at `at` is still up; if so, the UI is repainted when its time is over.
+fn note_is_up(ctx: &egui::Context, at: std::time::Instant) -> bool {
+    let left = NOTE_SHOWN_FOR.checked_sub(at.elapsed());
+    if let Some(left) = left {
+        ctx.request_repaint_after(left);
+    }
+    left.is_some()
+}
+
+/// The text pasted this frame, if any: Ctrl+V, or on Linux a middle click (primary selection).
+pub fn pasted_text(ui: &egui::Ui) -> Option<String> {
+    ui.input(|i| {
+        i.events.iter().find_map(|e| match e {
+            egui::Event::Paste(text) | egui::Event::MiddleClickPaste { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+    })
+}
+
+/// "Copied to clipboard" shown under the control that copied, for a moment.
 #[derive(Default)]
 pub struct Copied {
     shown: Option<(std::time::Instant, egui::Pos2)>,
@@ -282,22 +304,19 @@ impl Copied {
 
     /// Whether the confirmation is still shown (a hover text of the same control would cover it).
     pub fn active(&self) -> bool {
-        self.shown.is_some_and(|(at, _)| at.elapsed() < Self::SHOWN_FOR)
+        self.shown.is_some_and(|(at, _)| at.elapsed() < NOTE_SHOWN_FOR)
     }
-
-    const SHOWN_FOR: std::time::Duration = std::time::Duration::from_secs(2);
 
     /// Draws the confirmation while it lasts; call once per frame.
     pub fn ui(&mut self, ui: &egui::Ui) {
         let Some((at, pos)) = self.shown else { return };
-        let Some(left) = Self::SHOWN_FOR.checked_sub(at.elapsed()) else {
+        if !note_is_up(ui.ctx(), at) {
             self.shown = None;
             return;
-        };
+        }
         egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), egui::Id::unique("copied"), pos).show(|ui| {
             ui.label("Copied to clipboard");
         });
-        ui.ctx().request_repaint_after(left);
     }
 }
 
@@ -306,17 +325,83 @@ pub fn small_button(ui: &mut egui::Ui, enabled: bool, text: &str) -> egui::Respo
     ui.add_enabled(enabled, egui::Button::new(text.to_string()).small())
 }
 
-/// Port entry that only ever holds a valid port (1-65535) or nothing. An edit that would make
-/// it anything else is undone, so a stray key does not silently change the number; spaces
-/// around a pasted value are dropped.
-pub fn port_field(ui: &mut egui::Ui, enabled: bool, port: &mut String) -> egui::Response {
-    let before = port.clone();
-    let response = ui.add_enabled(enabled, egui::TextEdit::singleline(port).desired_width(70.0));
+/// A single-line field that only ever holds text `accept` approves. `accept` gets the edited
+/// text and what was pasted this frame, if anything, and returns the text to keep (the edit as
+/// it is, or a cleaned-up form) or `None` to undo the edit. An undone edit is not trimmed to
+/// fit, which would silently drop a character elsewhere: the text and the cursor go back to
+/// where they were, and `rule` is shown under the field for a moment, so the user sees that
+/// (and why) nothing was entered, also in a masked field.
+pub fn validated_edit(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    text: &mut String,
+    id_salt: &str,
+    rule: &str,
+    style: impl for<'t> FnOnce(egui::TextEdit<'t>) -> egui::TextEdit<'t>,
+    accept: impl FnOnce(&str, Option<&str>) -> Option<String>,
+) -> egui::Response {
+    use egui::text::{CCursor, CCursorRange};
+
+    let id = ui.make_persistent_id(id_salt);
+    let before = text.clone();
+    // The stored state is last frame's: the cursor as it was before this frame's keys.
+    let cursor_before = egui::TextEdit::load_state(ui.ctx(), id).and_then(|s| s.cursor.char_range());
+    let output = ui
+        .add_enabled_ui(enabled, |ui| style(egui::TextEdit::singleline(text).id(id)).show(ui))
+        .inner;
+    let response = output.response.response;
     if response.changed() {
-        let text: String = port.chars().filter(|c| !c.is_whitespace()).collect();
-        *port = if is_port_input(&text) { text } else { before };
+        let kept = accept(text, pasted_text(ui).as_deref());
+        let rejected = kept.is_none();
+        let kept = kept.unwrap_or_else(|| before.clone());
+        if kept != *text {
+            let mut state = output.state;
+            // Back to the old text = back to the old cursor; a text put in place of the edit
+            // (cleaned up, or a pasted value that replaces the field) gets the cursor at its end.
+            state.cursor.set_char_range(if kept == before {
+                cursor_before
+            } else {
+                Some(CCursorRange::one(CCursor::new(kept.chars().count())))
+            });
+            state.store(ui.ctx(), id);
+            *text = kept;
+            // This frame was already painted with the edit as typed; show the kept text now,
+            // not at the next key or cursor blink.
+            ui.ctx().request_repaint();
+        }
+        ui.data_mut(|d| {
+            if rejected {
+                d.insert_temp(id, std::time::Instant::now());
+            } else {
+                d.remove::<std::time::Instant>(id);
+            }
+        });
+    }
+    if let Some(at) = ui.data(|d| d.get_temp::<std::time::Instant>(id)) {
+        if response.has_focus() && note_is_up(ui.ctx(), at) {
+            response.show_tooltip_text(rule);
+        } else {
+            ui.data_mut(|d| d.remove::<std::time::Instant>(id));
+        }
     }
     response
+}
+
+/// Port entry that only ever holds a valid port (1-65535) or nothing; spaces around a pasted
+/// value are dropped.
+pub fn port_field(ui: &mut egui::Ui, enabled: bool, port: &mut String) -> egui::Response {
+    validated_edit(
+        ui,
+        enabled,
+        port,
+        "port",
+        "A port is a number from 1 to 65535.",
+        |edit| edit.desired_width(70.0),
+        |text, _| {
+            let text: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+            is_port_input(&text).then_some(text)
+        },
+    )
 }
 
 fn is_port_input(text: &str) -> bool {

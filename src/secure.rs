@@ -97,6 +97,13 @@ pub fn is_password_input(text: &str) -> bool {
     pw.len() <= PASSWORD_LEN && pw.bytes().all(|b| PASSWORD_ALPHABET.contains(&b))
 }
 
+/// The (normalized) password in a pasted text that holds a complete one: "abcd 1234", also with
+/// a label in front, as in the line the CLI server prints ("Password: abcd 1234").
+pub fn pasted_password(pasted: &str) -> Option<String> {
+    let pw = normalize_password(pasted.rsplit(':').next()?);
+    (pw.len() == PASSWORD_LEN && is_password_input(&pw)).then_some(pw)
+}
+
 /// Groups a password for display: "abcd1234" -> "abcd 1234".
 pub fn display_password(pw: &str) -> String {
     if pw.chars().count() == PASSWORD_LEN {
@@ -555,6 +562,15 @@ mod tests {
         }
         for bad in ["abcd 12345", "Password: abcd1234", "abc!", "ąbcd", "ab_cd"] {
             assert!(!is_password_input(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn pasted_password_is_a_complete_one() {
+        assert_eq!(pasted_password("abcd 1234").as_deref(), Some("abcd1234"));
+        assert_eq!(pasted_password("Password: ABCD-1234\n").as_deref(), Some("abcd1234"));
+        for bad in ["abcd", "abcd 12345", "Password:", "abcd: 1234", "abc! 1234"] {
+            assert_eq!(pasted_password(bad), None, "{bad:?}");
         }
     }
 

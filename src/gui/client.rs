@@ -157,8 +157,7 @@ impl ClientTab {
                 // "address:port" as given by the server ("My address"): the port goes to its
                 // field, on paste or when leaving the field (not while typing, or the rest of
                 // the port would land in the address).
-                let pasted =
-                    edit.changed() && ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))));
+                let pasted = edit.changed() && widgets::pasted_text(ui).is_some();
                 if (pasted || edit.lost_focus())
                     && let Some((host, port)) = split_host_port(&self.host)
                 {
@@ -181,21 +180,25 @@ impl ClientTab {
             });
             ui.vertical(|ui| {
                 widgets::caption(ui, "Password");
-                let before = self.password.clone();
-                let edit = egui::TextEdit::singleline(&mut self.password)
-                    .password(true)
-                    .hint_text(if settings.client_secure {
-                        "abcd 1234"
-                    } else {
-                        "not needed"
-                    })
-                    .desired_width(110.0);
-                let resp = ui.add_enabled(!running && settings.client_secure, edit);
-                // An edit that cannot be a password is undone, rather than trimmed to fit
-                // (which would silently drop a character elsewhere).
-                if resp.changed() && !crate::secure::is_password_input(&self.password) {
-                    self.password = before;
-                }
+                let hint = if settings.client_secure {
+                    "abcd 1234"
+                } else {
+                    "not needed"
+                };
+                let resp = widgets::validated_edit(
+                    ui,
+                    !running && settings.client_secure,
+                    &mut self.password,
+                    "password",
+                    "A password is 8 letters or digits.",
+                    |edit| edit.password(true).hint_text(hint).desired_width(110.0),
+                    // A complete password pasted where it does not fit (after the old one, or
+                    // as the CLI server's "Password: abcd 1234" line) replaces the field.
+                    |text, pasted| match crate::secure::is_password_input(text) {
+                        true => Some(text.to_string()),
+                        false => pasted.and_then(crate::secure::pasted_password),
+                    },
+                );
                 if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && !running {
                     self.connect(settings);
                 }
