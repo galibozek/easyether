@@ -128,9 +128,40 @@ fn run_gui() {
         viewport,
         ..Default::default()
     };
+    std::panic::set_hook(Box::new(|info| {
+        report_fatal(&format!("EasyEther stopped on an internal error.\n\n{info}"))
+    }));
     if let Err(e) = eframe::run_native("EasyEther", options, Box::new(|cc| Ok(Box::new(gui::App::new(cc))))) {
-        eprintln!("EasyEther: {e}");
+        use eframe::Error::{Glutin, NoGlutinConfigs, OpenGL};
+        let mut message = format!("EasyEther could not open its window.\n\n{e}");
+        if matches!(e, Glutin(_) | NoGlutinConfigs(..) | OpenGL(_)) {
+            message.push_str(
+                "\n\nThe window needs OpenGL 2.0 or newer. Check that the graphics card's driver is installed.",
+            );
+        }
+        report_fatal(&message);
         std::process::exit(1);
+    }
+}
+
+/// Says why the GUI stopped. The Windows release build has no console, so stderr goes nowhere
+/// there and the message is shown in a message box as well.
+fn report_fatal(message: &str) {
+    eprintln!("{message}");
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
+        let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
+        let (text, title) = (wide(message), wide("EasyEther"));
+        // SAFETY: both strings are NUL-terminated and outlive the call; no owner window.
+        unsafe {
+            MessageBoxW(
+                std::ptr::null_mut(),
+                text.as_ptr(),
+                title.as_ptr(),
+                MB_OK | MB_ICONERROR,
+            )
+        };
     }
 }
 
